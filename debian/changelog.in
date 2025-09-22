@@ -1,0 +1,5 @@
+libvma (@VERSION@-@PRJ_LIBRARY_RELEASE@) release; urgency=low
+
+  * Please refer to CHANGES for full changelog.
+
+ -- Liran Oz <lirano@mellanox.com>  @BUILD_DATE_CHANGELOG@
