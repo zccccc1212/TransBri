@@ -152,7 +152,7 @@ public:
 	//int send();
 
 	ssize_t write( __const void *__buf, size_t __nbytes);
-	ssize_t read( __const void *__buf, size_t __nbytes);
+	ssize_t read( void *__buf, size_t __nbytes);
 
 
 

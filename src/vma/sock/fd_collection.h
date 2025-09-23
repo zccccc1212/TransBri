@@ -45,6 +45,10 @@
 #include "vma/event/event_handler_manager.h"
 #include <vma/sock/cleanable_obj.h>
 #include "vma/dev/ring_tap.h"
+//zc add
+#include "vma/sock/sock-redirect.h"
+
+
 
 typedef vma_list_t<socket_fd_api, socket_fd_api::pendig_to_remove_node_offset> sock_fd_api_list_t;
 typedef vma_list_t<epfd_info, epfd_info::epfd_info_node_offset> epfd_info_list_t;
@@ -315,6 +319,9 @@ inline int fd_collection::get_fd_map_size()
 }
 
 extern fd_collection* g_p_fd_collection;
+
+
+
 // zc add
 extern My_fd_collection* my_g_p_fd_collection;
 

@@ -818,19 +818,7 @@ extern "C"
 EXPORT_SYMBOL
 int socket(int __domain, int __type, int __protocol)
 {
-	// zc add
-	int fd = orig_os_api.socket(__domain, __type, __protocol);
-
-	my_g_p_fd_collection->add_socketfd(fd);
-
-	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(fd);
-	p_socket_object->socket();
-	//printf("Contents of server's buffer: '%s'\n", res.buf);
-
-	return fd;
-
-
-	//return socket_internal(__domain, __type, __protocol, true);
+	return socket_internal(__domain, __type, __protocol, true);
 }
 
 // allow calling our socket(...) implementation safely from within libvma.so
@@ -854,6 +842,26 @@ int socket_internal(int __domain, int __type, int __protocol, bool check_offload
 	if (fd < 0) {
 		return fd;
 	}
+	// zc add
+	int ret = 0;
+
+	if(my_g_p_fd_collection){
+		ret = my_g_p_fd_collection->add_socketfd(fd);
+	}
+	else{
+		printf("my_g_p_fd_collection is null \n");
+		return fd;
+	}
+	if(ret == 1)//add sockfd succeed
+	{
+		printf("add sockfd succeed\n");
+		return fd;
+	}
+
+	return fd;
+
+
+
 
 	if (g_p_fd_collection) {
 		// Sanity check to remove any old sockinfo object using the same fd!!
@@ -944,7 +952,7 @@ int listen(int __fd, int backlog)
 	p_socket_object = fd_collection_get_sockfd(__fd);
 
 	if (p_socket_object) {
-		int ret = p_socket_object->prepareListen(); // for verifying that the socket is really offloaded
+		ret = p_socket_object->prepareListen(); // for verifying that the socket is really offloaded
 		if (ret < 0)
 			return ret; //error
 		if (ret > 0) { //Passthrough
@@ -1037,7 +1045,7 @@ int bind(int __fd, const struct sockaddr *__addr, socklen_t __addrlen)
 	NOT_IN_USE(buf); /* to suppress warning in case VMA_MAX_DEFINED_LOG_LEVEL */
 	srdr_logdbg_entry("fd=%d, %s", __fd, sprintf_sockaddr(buf, 256, __addr, __addrlen));
 
-	int ret = 0;
+	ret = 0;
 	socket_fd_api* p_socket_object = NULL;
 	p_socket_object = fd_collection_get_sockfd(__fd);
 	if (p_socket_object) {
@@ -1096,7 +1104,7 @@ int connect(int __fd, const struct sockaddr *__to, socklen_t __tolen)
 	NOT_IN_USE(buf); /* to suppress warning in case VMA_MAX_DEFINED_LOG_LEVEL */
 	srdr_logdbg_entry("fd=%d, %s", __fd, sprintf_sockaddr(buf, 256, __to, __tolen));
 
-	int ret = 0;
+	ret = 0;
 	socket_fd_api* p_socket_object = NULL;
 	p_socket_object = fd_collection_get_sockfd(__fd);
 
@@ -2998,10 +3006,8 @@ Sockfd_tcp::Sockfd_tcp(int fd)
     : m_fd(fd),send_buffer_current(0),recv_buffer_current(0)
 {
     // 使用值初始化确保所有成员处于安全状态
-    my_res = {};
+	resources_init();
     
-    // 明确设置socket
-    my_res.sock = fd;
 }
 
 Sockfd_tcp::~Sockfd_tcp(){
@@ -3477,7 +3483,7 @@ int Sockfd_tcp::sock_sync_data(int sock, int xfer_size, char *local_data, char *
 
 void Sockfd_tcp::resources_init()
 {
-    //memset(my_res, 0, sizeof(my_res));
+    memset(&my_res, 0, sizeof(my_res));
     my_res.sock = m_fd;
 }
 
@@ -3630,7 +3636,7 @@ ssize_t Sockfd_tcp::write( __const void *__buf, size_t __nbytes){
 	}
 	return __nbytes;
 }
-ssize_t Sockfd_tcp::read(__const void *__buf, size_t __nbytes){
+ssize_t Sockfd_tcp::read(void *__buf, size_t __nbytes){
 	
 	int ret = poll_completion();
 	if(ret == 3){

@@ -63,6 +63,9 @@ My_fd_collection* my_g_p_fd_collection = NULL;
 
 fd_collection* g_p_fd_collection = NULL;
 
+
+
+
 fd_collection::fd_collection() :
 	lock_mutex_recursive("fd_collection"),
 	m_timer_handle(0),
@@ -710,7 +713,7 @@ int My_fd_collection::add_socketfd(int fd) {
         // 创建新的Sockfd_tcp实例
         Sockfd_tcp* sockfd = new Sockfd_tcp(fd);
         m_fd_map[fd] = sockfd;
-        return 0; // 成功
+        return 1; // 成功
     } catch (const std::exception& e) {
         return -3; // 创建失败
     }
