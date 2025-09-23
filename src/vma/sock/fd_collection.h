@@ -318,15 +318,21 @@ inline int fd_collection::get_fd_map_size()
 	return m_n_fd_map_size;
 }
 
-extern fd_collection* g_p_fd_collection;
 
 
 
 // zc add
 extern My_fd_collection* my_g_p_fd_collection;
 
+inline Sockfd_tcp* my_fd_collection_get_sockfd(int fd)
+{
+	if (my_g_p_fd_collection) 
+		return my_fd_collection->find_socketfd(fd);
+	return NULL;
+}
 
 
+extern fd_collection* g_p_fd_collection;
 
 inline socket_fd_api* fd_collection_get_sockfd(int fd)
 {

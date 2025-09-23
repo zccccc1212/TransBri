@@ -941,7 +941,8 @@ int listen(int __fd, int backlog)
 		// zc add
 	int ret = orig_os_api.listen(__fd, backlog);
 
-	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	Sockfd_tcp* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(__fd);
 	p_socket->listen(backlog);
 	//printf("Contents of server's buffer: '%s'\n", res.buf);
 
@@ -980,7 +981,8 @@ int accept(int __fd, struct sockaddr *__addr, socklen_t *__addrlen)
 
 	my_g_p_fd_collection->add_socketfd(myfd);
 
-	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(myfd);
+	Sockfd_tcp* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(myfd);
 	p_socket->accept();
 	//printf("Contents of server's buffer: '%s'\n", res.buf);
 
@@ -1031,7 +1033,8 @@ int bind(int __fd, const struct sockaddr *__addr, socklen_t __addrlen)
 	// zc add
 	int ret = orig_os_api.bind(__fd, __addr, __addrlen);
 
-	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	Sockfd_tcp* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(__fd);
 	p_socket->bind(__addr,__addrlen);
 	//printf("Contents of server's buffer: '%s'\n", res.buf);
 
@@ -1087,7 +1090,8 @@ int connect(int __fd, const struct sockaddr *__to, socklen_t __tolen)
 		// zc add
 	int ret = orig_os_api.connect(__fd, __to, __tolen);
 
-	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	Sockfd_tcp* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(__fd);
 	p_socket->connect();
 	//printf("Contents of server's buffer: '%s'\n", res.buf);
 
@@ -1449,7 +1453,8 @@ ssize_t read(int __fd, void *__buf, size_t __nbytes)
 	// zc add
 	//int ret = orig_os_api.connect(__fd, __to, __tolen);
 
-	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	Sockfd_tcp* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(__fd);
 	return p_socket->read(__buf,  __nbytes);
 	//printf("Contents of server's buffer: '%s'\n", res.buf);
 
@@ -1810,7 +1815,7 @@ ssize_t write(int __fd, __const void *__buf, size_t __nbytes)
 
 	//zc add 
 	Sockfd_tcp* p_socket = NULL;
-	p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	p_socket = my_fd_collection_get_sockfd(__fd);
 	return p_socket->write(__buf, __nbytes);
 
 
@@ -1875,7 +1880,7 @@ ssize_t send(int __fd, __const void *__buf, size_t __nbytes, int __flags)
 
 	//zc add 
 	Sockfd_tcp* p_socket = NULL;
-	p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	p_socket = my_fd_collection_get_sockfd(__fd);
 	return p_socket->send(__buf,  __nbytes,  __flags);
 
 
