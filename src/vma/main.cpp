@@ -731,6 +731,10 @@ static void do_global_ctors_helper()
 
 	NEW_CTOR(g_p_ip_frag_manager, ip_frag_manager());
 
+	// zc add
+	NEW_CTOR(my_g_p_fd_collection, My_fd_collection());
+
+
 	NEW_CTOR(g_p_fd_collection, fd_collection());
 
 	if (check_if_regular_file (safe_mce_sys().conf_filename))

@@ -68,6 +68,37 @@ protected:
 	ring*	m_p_ring;
 };
 
+//zc add
+// 前置声明
+class Sockfd_tcp;
+
+class My_fd_collection {
+public:
+    My_fd_collection();
+    ~My_fd_collection();
+
+    // 添加socket文件描述符到集合
+    int add_socketfd(int fd);
+    
+    // 根据fd查找对应的Sockfd_tcp实例
+    Sockfd_tcp* find_socketfd(int fd);
+    
+    // 从集合中移除并关闭socket
+    bool remove_socketfd(int fd);
+    
+    // 获取集合中socket的数量
+    size_t size() const;
+    
+    // 清空集合并关闭所有socket
+    void clear();
+
+private:
+    // 使用map存储fd到Sockfd_tcp指针的映射
+    std::map<int, Sockfd_tcp*> m_fd_map;
+};
+
+
+
 
 class fd_collection : private lock_mutex_recursive, public timer_handler
 {
@@ -284,6 +315,11 @@ inline int fd_collection::get_fd_map_size()
 }
 
 extern fd_collection* g_p_fd_collection;
+// zc add
+extern My_fd_collection* my_g_p_fd_collection;
+
+
+
 
 inline socket_fd_api* fd_collection_get_sockfd(int fd)
 {

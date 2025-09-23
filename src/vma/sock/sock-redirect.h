@@ -89,6 +89,94 @@ struct mmsghdr;
 const char* sprintf_fdset(char* buf, int buflen, int __nfds, fd_set *__fds);
 
 
+
+
+//zc add
+/* structure to exchange data which is needed to connect the QPs */
+struct cm_con_data_t
+{
+    uint64_t addr;        /* Buffer address */
+    uint32_t rkey;        /* Remote key */
+    uint32_t qp_num;      /* QP number */
+    uint16_t lid;         /* LID of the IB port */
+    uint8_t gid[16];      /* gid */
+} __attribute__((packed));
+
+/* structure of system resources */
+struct resources
+{
+    struct ibv_device_attr device_attr; /* Device attributes */
+    struct ibv_port_attr port_attr;     /* IB port attributes */
+    struct cm_con_data_t remote_props;  /* values to connect to remote side */
+    struct ibv_context *ib_ctx;         /* device handle */
+    struct ibv_pd *pd;                  /* PD handle */
+    struct ibv_cq *cq;                  /* CQ handle */
+    struct ibv_qp *qp;                  /* QP handle */
+    struct ibv_mr *recv_mr;                  /* MR handle for recv buf */
+	struct ibv_mr *send_mr;                  /* MR handle for send buf */
+    char *recv_buf;                          /* memory buffer pointer, recv buf */
+    char *send_buf;                          /* memory buffer pointer, send_buf */
+    int sock;                           /* TCP socket file descriptor */
+};
+
+// zc add
+
+class Sockfd_tcp{
+public:
+	Sockfd_tcp(int fd);
+	virtual ~Sockfd_tcp();
+
+	// zc add
+	int sock_sync_data(int sock, int xfer_size, char *local_data, char *remote_data);
+	int estable_rdma_connect(int gidindex);
+	int create_rdma_resources();
+	int modify_qp_to_init(struct ibv_qp *qp);
+	int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dlid, uint8_t *dgid, int gidindex);
+	int modify_qp_to_rts(struct ibv_qp *qp);
+	int post_receive();
+	int poll_completion();
+	void resources_init();
+	
+	int post_send();
+
+
+	//
+
+
+	int socket();
+	int accept();
+	int connect();
+	int listen(int backlog);
+	int bind(const sockaddr *__addr, socklen_t __addrlen);
+	ssize_t send(__const void *__buf, size_t __nbytes, int __flags);
+	//int send();
+
+	ssize_t write( __const void *__buf, size_t __nbytes);
+	ssize_t read( __const void *__buf, size_t __nbytes);
+
+
+
+private:
+	int m_fd;
+	struct resources my_res;
+	int m_qpn;
+	int m_recv_cqn;
+	int m_send_cqn;
+	int send_buffer_total;
+	int recv_buffer_total;
+	int send_buffer_current;
+	int recv_buffer_current;
+
+
+};
+
+
+
+
+
+
+
+
 /**
  *-----------------------------------------------------------------------------
  *  variables to hold the function-pointers to original functions

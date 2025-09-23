@@ -33,6 +33,9 @@
 
 #include "sock-redirect.h"
 
+//zc add
+#include <infiniband/verbs.h>
+
 #include <sys/time.h>
 #include <dlfcn.h>
 #include <iostream>
@@ -62,6 +65,15 @@
 
 using namespace std;
 
+
+//zc add
+/* poll CQ timeout in millisec (2 seconds) */
+#define MAX_POLL_CQ_TIMEOUT 2000
+#define MSG "SEND operation "
+#define RDMAMSGR "RDMA read operation "
+#define RDMAMSGW "RDMA send operation"
+#define MSG_SIZE 64
+#define MR_SIZE 6400
 
 #define MODULE_NAME 		"srdr:"
 
@@ -806,7 +818,19 @@ extern "C"
 EXPORT_SYMBOL
 int socket(int __domain, int __type, int __protocol)
 {
-	return socket_internal(__domain, __type, __protocol, true);
+	// zc add
+	int fd = orig_os_api.socket(__domain, __type, __protocol);
+
+	my_g_p_fd_collection->add_socketfd(fd);
+
+	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(fd);
+	p_socket_object->socket();
+	//printf("Contents of server's buffer: '%s'\n", res.buf);
+
+	return fd;
+
+
+	//return socket_internal(__domain, __type, __protocol, true);
 }
 
 // allow calling our socket(...) implementation safely from within libvma.so
@@ -906,6 +930,16 @@ int listen(int __fd, int backlog)
 {
 	srdr_logdbg_entry("fd=%d, backlog=%d", __fd, backlog);
 
+		// zc add
+	int ret = orig_os_api.listen(__fd, backlog);
+
+	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	p_socket->listen(backlog);
+	//printf("Contents of server's buffer: '%s'\n", res.buf);
+
+	return ret;
+
+
 	socket_fd_api* p_socket_object = NULL;
 	p_socket_object = fd_collection_get_sockfd(__fd);
 
@@ -933,6 +967,20 @@ extern "C"
 EXPORT_SYMBOL
 int accept(int __fd, struct sockaddr *__addr, socklen_t *__addrlen)
 {
+	//zc add
+	int myfd = orig_os_api.accept(__fd, __addr, __addrlen);
+
+	my_g_p_fd_collection->add_socketfd(myfd);
+
+	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(myfd);
+	p_socket->accept();
+	//printf("Contents of server's buffer: '%s'\n", res.buf);
+
+	return myfd;
+
+
+
+
 	socket_fd_api* p_socket_object = NULL;
 	p_socket_object = fd_collection_get_sockfd(__fd);
 	if (p_socket_object)
@@ -971,6 +1019,19 @@ int bind(int __fd, const struct sockaddr *__addr, socklen_t __addrlen)
 	BULLSEYE_EXCLUDE_BLOCK_START
 	if (!orig_os_api.bind) get_orig_funcs();
 	BULLSEYE_EXCLUDE_BLOCK_END
+
+	// zc add
+	int ret = orig_os_api.bind(__fd, __addr, __addrlen);
+
+	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	p_socket->bind(__addr,__addrlen);
+	//printf("Contents of server's buffer: '%s'\n", res.buf);
+
+	return ret;
+	//
+
+
+
 
 	char buf[256];
 	NOT_IN_USE(buf); /* to suppress warning in case VMA_MAX_DEFINED_LOG_LEVEL */
@@ -1014,6 +1075,17 @@ extern "C"
 EXPORT_SYMBOL
 int connect(int __fd, const struct sockaddr *__to, socklen_t __tolen)
 {
+
+		// zc add
+	int ret = orig_os_api.connect(__fd, __to, __tolen);
+
+	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	p_socket->connect();
+	//printf("Contents of server's buffer: '%s'\n", res.buf);
+
+	return ret;
+
+
 	int errno_tmp = errno;
 
 	BULLSEYE_EXCLUDE_BLOCK_START
@@ -1365,6 +1437,18 @@ ssize_t read(int __fd, void *__buf, size_t __nbytes)
 {
 	srdr_logfuncall_entry("fd=%d", __fd);
 
+
+	// zc add
+	//int ret = orig_os_api.connect(__fd, __to, __tolen);
+
+	Sockfd_tcp* p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	return p_socket->read(__buf,  __nbytes);
+	//printf("Contents of server's buffer: '%s'\n", res.buf);
+
+	//return ret;
+
+
+
 	socket_fd_api* p_socket_object = NULL;
 	p_socket_object = fd_collection_get_sockfd(__fd);
 	if (p_socket_object) {
@@ -1715,6 +1799,14 @@ ssize_t write(int __fd, __const void *__buf, size_t __nbytes)
 {
 	srdr_logfuncall_entry("fd=%d, nbytes=%d", __fd, __nbytes);
 
+
+	//zc add 
+	Sockfd_tcp* p_socket = NULL;
+	p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	return p_socket->write(__buf, __nbytes);
+
+
+
 	socket_fd_api* p_socket_object = NULL;
 	p_socket_object = fd_collection_get_sockfd(__fd);
 	if (p_socket_object) {
@@ -1772,6 +1864,13 @@ EXPORT_SYMBOL
 ssize_t send(int __fd, __const void *__buf, size_t __nbytes, int __flags)
 {
 	srdr_logfuncall_entry("fd=%d, nbytes=%d", __fd, __nbytes);
+
+	//zc add 
+	Sockfd_tcp* p_socket = NULL;
+	p_socket = my_g_p_fd_collection->find_socketfd(__fd);
+	return p_socket->send(__buf,  __nbytes,  __flags);
+
+
 
 	socket_fd_api* p_socket_object = NULL;
 	p_socket_object = fd_collection_get_sockfd(__fd);
@@ -2889,3 +2988,675 @@ sighandler_t signal(int signum, sighandler_t handler)
 
 	return orig_os_api.signal(signum, handler);
 }
+
+
+
+//zc add
+
+
+Sockfd_tcp::Sockfd_tcp(int fd)
+    : m_fd(fd),send_buffer_current(0),recv_buffer_current(0)
+{
+    // 使用值初始化确保所有成员处于安全状态
+    my_res = {};
+    
+    // 明确设置socket
+    my_res.sock = fd;
+}
+
+Sockfd_tcp::~Sockfd_tcp(){
+
+}
+
+
+int Sockfd_tcp::post_send()
+{
+    struct ibv_send_wr sr;
+    struct ibv_sge sge;
+    struct ibv_send_wr *bad_wr = NULL;
+    int rc;
+
+    /* prepare the scatter/gather entry */
+    memset(&sge, 0, sizeof(sge));
+
+
+
+    sge.addr = (uintptr_t)my_res.send_buf;
+    sge.length = MSG_SIZE;
+    sge.lkey = my_res.send_mr->lkey;
+
+    /* prepare the send work request */
+    memset(&sr, 0, sizeof(sr));
+    sr.next = NULL;
+    sr.wr_id = 0;//尝试用id来区分，send统一为10，recv统一为11
+    sr.sg_list = &sge;
+    sr.num_sge = 1;
+    sr.opcode = IBV_WR_SEND;
+    sr.send_flags = IBV_SEND_SIGNALED;
+    /*if(opcode != IBV_WR_SEND)
+    {
+        sr.wr.rdma.remote_addr = my_res.remote_props.addr;
+        sr.wr.rdma.rkey = my_res.remote_props.rkey;
+    }*/
+
+    /* there is a Receive Request in the responder side, so we won't get any into RNR flow */
+    rc = ibv_post_send(my_res.qp, &sr, &bad_wr);
+    if(rc)
+    {
+        fprintf(stderr, "failed to post SR\n");
+    }
+    else
+    {
+        fprintf(stdout, "Send Request was posted\n");
+    }
+    return rc;
+}
+
+int Sockfd_tcp::post_receive()
+{
+    struct ibv_recv_wr rr;
+    struct ibv_sge sge;
+    struct ibv_recv_wr *bad_wr;
+    int rc;
+
+    /* prepare the scatter/gather entry */
+    memset(&sge, 0, sizeof(sge));
+    sge.addr = (uintptr_t)my_res.recv_buf;
+    sge.length = MSG_SIZE;
+    sge.lkey = my_res.recv_mr->lkey;
+
+    /* prepare the receive work request */
+    memset(&rr, 0, sizeof(rr));
+    rr.next = NULL;
+    rr.wr_id = 0;//尝试用id来区分，send统一为10，recv统一为11
+    rr.sg_list = &sge;
+    rr.num_sge = 1;
+
+    /* post the Receive Request to the RQ */
+    rc = ibv_post_recv(my_res.qp, &rr, &bad_wr);
+    if(rc)
+    {
+        fprintf(stderr, "failed to post RR\n");
+    }
+    else
+    {
+        fprintf(stdout, "Receive Request was posted\n");
+    }
+    return rc;
+}
+
+
+int Sockfd_tcp::poll_completion()
+{
+    struct ibv_wc wc;
+    unsigned long start_time_msec;
+    unsigned long cur_time_msec;
+    struct timeval cur_time;
+    int poll_result;
+    int rc = 0;
+    /* poll the completion for a while before giving up of doing it .. */
+    gettimeofday(&cur_time, NULL);
+    start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+    do
+    {
+        poll_result = ibv_poll_cq(my_res.cq, 1, &wc);
+
+
+		
+/*
+		uint64_t wr_id = wc.wr_id;
+		printf("wr_id  : %lu\n", wr_id);
+*/
+        gettimeofday(&cur_time, NULL);
+        cur_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+    }
+    while((poll_result == 0) && ((cur_time_msec - start_time_msec) < MAX_POLL_CQ_TIMEOUT));
+
+	
+
+
+	//send back
+	//post_send(&my_res);
+
+    if(poll_result < 0)
+    {
+        /* poll CQ failed */
+        fprintf(stderr, "poll CQ failed\n");
+        rc = 1;
+    }
+    else if(poll_result == 0)
+    {
+        /* the CQ is empty */
+        fprintf(stderr, "completion wasn't found in the CQ after timeout\n");
+        rc = 1;
+    }
+    else
+    {
+        /* CQE found */
+        fprintf(stdout, "completion was found in CQ with status 0x%x\n", wc.status);
+        /* check the completion status (here we don't care about the completion opcode */
+        if(wc.status != IBV_WC_SUCCESS)
+        {
+            fprintf(stderr, "got bad completion with status: 0x%x, vendor syndrome: 0x%x\n", 
+					wc.status, wc.vendor_err);
+            rc = 1;
+        }
+		if(wc.opcode & IBV_WC_RECV){
+			printf("rdma recv success and recv wr_id is %ld \n", wc.wr_id);
+			return 3;	
+		}
+		if(wc.opcode & IBV_WC_SEND){
+			printf("rdma send success and send wr_id is %ld \n", wc.wr_id);
+			return 4;
+		}
+    }
+    return rc;
+}
+
+
+
+int Sockfd_tcp::modify_qp_to_init(struct ibv_qp *qp)
+{
+    struct ibv_qp_attr attr;
+    int flags;
+    int rc;
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_INIT;
+    attr.port_num = 0;
+    attr.pkey_index = 0;
+    attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+    flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
+    rc = ibv_modify_qp(qp, &attr, flags);
+    if(rc)
+    {
+        fprintf(stderr, "failed to modify QP state to INIT\n");
+    }
+    return rc;
+}
+
+int Sockfd_tcp::modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dlid, uint8_t *dgid,int gidindex)
+{
+    struct ibv_qp_attr attr;
+    int flags;
+    int rc;
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTR;
+    attr.path_mtu = IBV_MTU_256;
+    attr.dest_qp_num = remote_qpn;
+    attr.rq_psn = 0;
+    attr.max_dest_rd_atomic = 1;
+    attr.min_rnr_timer = 0x12;
+    attr.ah_attr.is_global = 0;
+    attr.ah_attr.dlid = dlid;
+    attr.ah_attr.sl = 0;
+    attr.ah_attr.src_path_bits = 0;
+    attr.ah_attr.port_num = 0;
+	if(1)
+    //if(config.gid_idx >= 0)
+    {
+        attr.ah_attr.is_global = 1;
+        attr.ah_attr.port_num = 1;
+        memcpy(&attr.ah_attr.grh.dgid, dgid, 16);
+        attr.ah_attr.grh.flow_label = 0;
+        attr.ah_attr.grh.hop_limit = 1;
+        attr.ah_attr.grh.sgid_index = gidindex;// gid index 
+        attr.ah_attr.grh.traffic_class = 0;
+    }
+
+    flags = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
+            IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
+    rc = ibv_modify_qp(qp, &attr, flags);
+    if(rc)
+    {
+        fprintf(stderr, "failed to modify QP state to RTR\n");
+    }
+    return rc;
+}
+
+int Sockfd_tcp::modify_qp_to_rts(struct ibv_qp *qp)
+{
+    struct ibv_qp_attr attr;
+    int flags;
+    int rc;
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTS;
+    attr.timeout = 0x12;
+    attr.retry_cnt = 6;
+    attr.rnr_retry = 0;
+    attr.sq_psn = 0;
+    attr.max_rd_atomic = 1;
+    flags = IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
+            IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC;
+    rc = vma_ibv_modify_qp(qp, &attr, flags);
+    if(rc)
+    {
+        fprintf(stderr, "failed to modify QP state to RTS\n");
+    }
+    return rc;
+}
+
+int Sockfd_tcp::create_rdma_resources(){
+	struct ibv_device **dev_list = NULL;
+    struct ibv_qp_init_attr qp_init_attr;
+    struct ibv_device *ib_dev = NULL;
+    size_t size;
+    //int i;
+    int mr_flags = 0;
+    int cq_size = 0;
+    int num_devices;
+    int rc = 0;
+	
+	/* get device names in the system */
+    dev_list = ibv_get_device_list(&num_devices);
+    if(!dev_list)
+    {
+        fprintf(stderr, "failed to get IB devices list\n");
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+	/* if there isn't any IB device in host */
+    if(!num_devices)
+    {
+        fprintf(stderr, "found %d device(s)\n", num_devices);
+        rc = 1;
+        goto resources_create_exit;
+    }
+    fprintf(stdout, "found %d device(s)\n", num_devices);
+	
+	// 这里应该是找到正确的rdma设备，在我们的服务器现在有多张rdma网卡的情况下，这里后续需要想办法区分一下，只能用英伟达的网卡
+	// 好像不对，如果使用RC模式的话，照理来说intel的网卡也是可以的，这里需要区分吗？
+	ib_dev = dev_list[3];
+
+	/* get device handle */
+    my_res.ib_ctx = ibv_open_device(ib_dev);
+    if(!my_res.ib_ctx)
+    {
+        fprintf(stderr, "failed to open device \n");
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+	ibv_free_device_list(dev_list);
+	dev_list = NULL;
+    ib_dev = NULL;
+
+    /* query port properties */
+    if(ibv_query_port(my_res.ib_ctx, 1, &my_res.port_attr))// 端口
+    {
+        fprintf(stderr, "ibv_query_port on port 0 failed\n");
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+
+    /* allocate Protection Domain */
+    my_res.pd = ibv_alloc_pd(my_res.ib_ctx);
+    if(!my_res.pd)
+    {
+        fprintf(stderr, "ibv_alloc_pd failed\n");
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+    /* each side will send only one WR, so Completion Queue with 1 entry is enough */
+    cq_size = 1;
+    my_res.cq = ibv_create_cq(my_res.ib_ctx, cq_size, NULL, NULL, 0);
+    if(!my_res.cq)
+    {
+        fprintf(stderr, "failed to create CQ with %u entries\n", cq_size);
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+    /* allocate the memory buffer that will hold the data */
+	// recv buffer
+    size = MR_SIZE;
+    my_res.recv_buf = (char *) malloc(size);
+    if(!my_res.recv_buf)
+    {
+        fprintf(stderr, "failed to malloc %Zu bytes to memory buffer\n", size);
+        rc = 1;
+        goto resources_create_exit;
+    }
+    memset(my_res.recv_buf, 0 , size);
+
+    /* register the memory buffer */
+    mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE ;
+    my_res.recv_mr = ibv_reg_mr(my_res.pd, my_res.recv_buf, size, mr_flags);
+	if(!my_res.recv_mr)
+    {
+        fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
+        rc = 1;
+        goto resources_create_exit;
+    }
+	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
+            my_res.recv_buf, my_res.recv_mr->lkey, my_res.recv_mr->rkey, mr_flags);
+
+
+
+	// send buffer
+	/* allocate the memory buffer that will hold the data */
+    size = MR_SIZE;
+    my_res.send_buf = (char *) malloc(size);
+    if(!my_res.send_buf)
+    {
+        fprintf(stderr, "failed to malloc %Zu bytes to memory buffer\n", size);
+        rc = 1;
+        goto resources_create_exit;
+    }
+    memset(my_res.send_buf, 0 , size);
+
+    /* register the memory buffer */
+    mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE ;
+    my_res.send_mr = ibv_reg_mr(my_res.pd, my_res.send_buf, size, mr_flags);
+	if(!my_res.send_mr)
+    {
+        fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
+        rc = 1;
+        goto resources_create_exit;
+    }
+	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
+            my_res.send_buf, my_res.send_mr->lkey, my_res.send_mr->rkey, mr_flags);
+		
+
+
+	
+
+	/* create the Queue Pair */
+	memset(&qp_init_attr, 0, sizeof(qp_init_attr));
+    qp_init_attr.qp_type = IBV_QPT_RC;
+    qp_init_attr.sq_sig_all = 1;
+    qp_init_attr.send_cq = my_res.cq;
+    qp_init_attr.recv_cq = my_res.cq;
+    qp_init_attr.cap.max_send_wr = 1;
+    qp_init_attr.cap.max_recv_wr = 1;
+    qp_init_attr.cap.max_send_sge = 1;
+    qp_init_attr.cap.max_recv_sge = 1;
+    my_res.qp = ibv_create_qp(my_res.pd, &qp_init_attr);
+
+    if(!my_res.qp)
+    {
+        fprintf(stderr, "failed to create QP\n");
+        rc = 1;
+        goto resources_create_exit;
+    }
+    fprintf(stdout, "QP was created, QP number=0x%x\n", my_res.qp->qp_num);
+
+resources_create_exit:
+	if(rc)
+    {
+        /* Error encountered, cleanup */
+        if(my_res.qp)
+        {
+            ibv_destroy_qp(my_res.qp);
+            my_res.qp = NULL;
+        }
+		if(my_res.recv_mr)
+        {
+            ibv_dereg_mr(my_res.recv_mr);
+            my_res.recv_mr = NULL;
+        }
+        if(my_res.send_mr)
+        {
+            ibv_dereg_mr(my_res.send_mr);
+            my_res.send_mr = NULL;
+        }
+        if(my_res.recv_buf)
+        {
+            free(my_res.recv_buf);
+            my_res.recv_buf = NULL;
+        }
+		if(my_res.send_buf)
+        {
+            free(my_res.send_buf);
+            my_res.send_buf = NULL;
+        }
+        if(my_res.cq)
+        {
+            ibv_destroy_cq(my_res.cq);
+            my_res.cq = NULL;
+        }
+        if(my_res.pd)
+        {
+            ibv_dealloc_pd(my_res.pd);
+            my_res.pd = NULL;
+        }
+        if(my_res.ib_ctx)
+        {
+            ibv_close_device(my_res.ib_ctx);
+            my_res.ib_ctx = NULL;
+        }
+        if(dev_list)
+        {
+            ibv_free_device_list(dev_list);
+            dev_list = NULL;
+        }
+        if(my_res.sock >= 0)
+        {
+            if(close(my_res.sock))
+            {
+                fprintf(stderr, "failed to close socket\n");
+            }
+            my_res.sock = -1;
+        }
+    }
+    return rc;
+}
+
+int Sockfd_tcp::sock_sync_data(int sock, int xfer_size, char *local_data, char *remote_data){
+	int rc;
+    int read_bytes = 0;
+    int total_read_bytes = 0;
+
+	rc = orig_os_api.write(sock, local_data, xfer_size);
+
+    if(rc < xfer_size)
+    {
+        fprintf(stderr, "Failed writing data during sock_sync_data\n");
+    }
+    else
+    {
+        rc = 0;
+    }
+
+    while(!rc && total_read_bytes < xfer_size)
+    {
+        read_bytes = orig_os_api.read(sock, remote_data, xfer_size);
+        if(read_bytes > 0)
+        {
+            total_read_bytes += read_bytes;
+        }
+        else
+        {
+            rc = read_bytes;
+        }
+    }
+    return rc;
+}
+
+void Sockfd_tcp::resources_init()
+{
+    //memset(my_res, 0, sizeof(my_res));
+    my_res.sock = m_fd;
+}
+
+
+int Sockfd_tcp::estable_rdma_connect(int gidindex){
+
+	/* exchange using TCP sockets info required to connect QPs */
+
+    struct cm_con_data_t local_con_data;
+    struct cm_con_data_t remote_con_data;
+    struct cm_con_data_t tmp_con_data;
+	union ibv_gid my_gid;
+
+	
+	//struct resources res;
+	resources_init();
+
+	//my_res = res;
+
+
+	//创建我们自用的rdma资源
+	create_rdma_resources();
+
+	// gid这个我还没看懂，后续要详细研究一下
+	int rc = ibv_query_gid(my_res.ib_ctx, 1, gidindex, &my_gid);// 144
+	if(rc)
+    {
+        fprintf(stderr, "could not get gid for port 0  index 2\n");
+        return rc;
+    }
+
+	//准备要发送的rdma元数据
+    local_con_data.addr = htonll((uintptr_t)my_res.recv_buf);
+    local_con_data.rkey = htonl(my_res.recv_mr->rkey);
+    local_con_data.qp_num = htonl(my_res.qp->qp_num);
+    local_con_data.lid = htons(my_res.port_attr.lid);
+	
+    memcpy(local_con_data.gid, &my_gid, 16);
+    fprintf(stdout, "\nLocal LID = 0x%x\n", my_res.port_attr.lid);
+
+	//同步两端的rdma元数据
+    if(sock_sync_data(my_res.sock, sizeof(struct cm_con_data_t), (char *) &local_con_data, (char *) &tmp_con_data) < 0)
+    {
+        fprintf(stderr, "failed to exchange connection data between sides\n");
+        rc = 1;
+        goto connect_qp_exit;
+    }
+
+	//保存好对端的rdma元数据
+    remote_con_data.addr = ntohll(tmp_con_data.addr);
+    remote_con_data.rkey = ntohl(tmp_con_data.rkey);
+    remote_con_data.qp_num = ntohl(tmp_con_data.qp_num);
+    remote_con_data.lid = ntohs(tmp_con_data.lid);
+    memcpy(remote_con_data.gid, tmp_con_data.gid, 16);
+
+    /* save the remote side attributes, we will need it for the post SR */
+    my_res.remote_props = remote_con_data;
+    //fprintf(stdout, "  Remote address = 0x%"PRIx64"\n", remote_con_data.addr);
+    fprintf(stdout, " Remote rkey = 0x%x\n", remote_con_data.rkey);
+    fprintf(stdout, " Remote QP number = 0x%x\n", remote_con_data.qp_num);
+    fprintf(stdout, " Remote LID = 0x%x\n", remote_con_data.lid);
+
+	//然后是修改qp的状态到rts ready to send
+    /* modify the QP to init */
+    rc = modify_qp_to_init(my_res.qp);
+    if(rc)
+    {
+        fprintf(stderr, "change QP state to INIT failed\n");
+        goto connect_qp_exit;
+    }
+
+    /* modify the QP to RTR */
+    rc = modify_qp_to_rtr(my_res.qp, remote_con_data.qp_num, remote_con_data.lid, remote_con_data.gid,gidindex);
+    if(rc)
+    {
+        fprintf(stderr, "failed to modify QP state to RTR\n");
+        goto connect_qp_exit;
+    }
+	
+	/*rc = post_receive(my_res);
+    if(rc)
+    {
+        fprintf(stderr, "failed to post RR\n");
+        goto connect_qp_exit;
+    }*/
+
+    /* modify the QP to RTS */
+    rc = modify_qp_to_rts(my_res.qp);
+    if(rc)
+    {
+        fprintf(stderr, "failed to modify QP state to RTS\n");
+        goto connect_qp_exit;
+    }
+    fprintf(stdout, "QP state was change to RTS\n");
+	//也就是说照理来说到这里rdma连接就已经成功建立完成了才对
+
+connect_qp_exit:
+
+	return rc;
+
+
+}
+
+int Sockfd_tcp::socket(){
+	
+
+	return m_fd;
+}
+
+int Sockfd_tcp::accept(){
+	estable_rdma_connect(2);// gidindex 144 2
+	post_receive();
+	//poll_completion();
+	return m_fd;
+}
+
+
+int Sockfd_tcp::connect(){
+	//如何区分144和155，如何让各自找到自己对应的gid index，这是一个问题
+
+	estable_rdma_connect(4);// gidindex 155 4
+	post_receive();
+	//post_receive();
+	//poll_completion();
+	return m_fd;
+}
+
+int Sockfd_tcp::bind(const sockaddr *__addr, socklen_t __addrlen){
+	if(__addr && __addrlen){
+
+	}
+	
+	
+	return 0;
+}
+
+int Sockfd_tcp::listen(int backlog){
+	if(backlog){
+
+	}
+	return 0;
+}
+
+ssize_t Sockfd_tcp::write( __const void *__buf, size_t __nbytes){
+	memcpy(my_res.send_buf,__buf,__nbytes);
+	post_send();
+	int ret = poll_completion();
+	if(ret == 4){
+		printf("rdma send success\n");
+	}
+	return __nbytes;
+}
+ssize_t Sockfd_tcp::read(__const void *__buf, size_t __nbytes){
+	
+	int ret = poll_completion();
+	if(ret == 3){
+		memcpy(__buf,my_res.recv_buf,__nbytes);
+	}
+	post_receive();
+	return __nbytes;
+}
+
+
+
+ssize_t Sockfd_tcp::send(__const void *__buf, size_t __nbytes, int __flags){
+	memcpy(my_res.send_buf,__buf,__nbytes);
+	post_send();
+	int ret = poll_completion();
+	if(ret == 4){
+		printf("rdma send success\n");
+	}
+	if(__flags){
+
+	}
+	return __nbytes;
+	//return 0;
+}
+
+
+// zc add
+extern My_fd_collection* my_g_p_fd_collection;
+extern fd_collection* g_p_fd_collection;

@@ -58,6 +58,9 @@
 #define fdcoll_logfunc		__log_func
 
 
+// zc add
+My_fd_collection* my_g_p_fd_collection = NULL;
+
 fd_collection* g_p_fd_collection = NULL;
 
 fd_collection::fd_collection() :
@@ -680,3 +683,76 @@ void fd_collection::remove_from_all_epfds(int fd, bool passthrough)
 
 	return;
 }
+
+//zc add
+
+
+// My_fd_collection 实现
+My_fd_collection::My_fd_collection() {
+    // 初始化代码
+}
+
+My_fd_collection::~My_fd_collection() {
+    clear();
+}
+
+int My_fd_collection::add_socketfd(int fd) {
+    if (fd < 0) {
+        return -1; // 无效的文件描述符
+    }
+    
+    // 检查是否已存在
+    if (m_fd_map.find(fd) != m_fd_map.end()) {
+        return -2; // 已存在
+    }
+    
+    try {
+        // 创建新的Sockfd_tcp实例
+        Sockfd_tcp* sockfd = new Sockfd_tcp(fd);
+        m_fd_map[fd] = sockfd;
+        return 0; // 成功
+    } catch (const std::exception& e) {
+        return -3; // 创建失败
+    }
+}
+
+Sockfd_tcp* My_fd_collection::find_socketfd(int fd) {
+    auto it = m_fd_map.find(fd);
+    if (it != m_fd_map.end()) {
+        return it->second;
+    }
+    return nullptr; // 未找到
+}
+
+bool My_fd_collection::remove_socketfd(int fd) {
+    auto it = m_fd_map.find(fd);
+    if (it != m_fd_map.end()) {
+        // 关闭socket
+        //close(fd);
+        
+        // 删除Sockfd_tcp实例
+        delete it->second;
+        
+        // 从map中移除
+        m_fd_map.erase(it);
+        return true;
+    }
+    return false;
+}
+
+size_t My_fd_collection::size() const {
+    return m_fd_map.size();
+}
+
+void My_fd_collection::clear() {
+    for (auto& pair : m_fd_map) {
+        // 关闭socket
+        //close(pair.first);
+        
+        // 删除Sockfd_tcp实例
+        delete pair.second;
+    }
+    m_fd_map.clear();
+}
+
+
