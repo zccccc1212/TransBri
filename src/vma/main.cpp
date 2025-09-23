@@ -730,9 +730,9 @@ static void do_global_ctors_helper()
 	NEW_CTOR(g_p_vlogger_timer_handler, vlogger_timer_handler()); 
 
 	NEW_CTOR(g_p_ip_frag_manager, ip_frag_manager());
-
+/*
 	// zc add
-	NEW_CTOR(my_g_p_fd_collection, My_fd_collection());
+	NEW_CTOR(my_g_p_fd_collection, My_fd_collection());*/
 
 
 	NEW_CTOR(g_p_fd_collection, fd_collection());
@@ -879,6 +879,11 @@ extern "C" int main_init(void)
 {
 
 	get_orig_funcs();
+
+
+	// zc add
+	NEW_CTOR(my_g_p_fd_collection, My_fd_collection());//尝试更早的初始化my_g_p_fd_collection，想办法解决段错误问题
+
 	safe_mce_sys();
 
 	g_init_global_ctors_done = false;
