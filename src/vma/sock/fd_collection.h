@@ -73,8 +73,6 @@ protected:
 };
 
 //zc add
-// 前置声明
-class Sockfd_tcp;
 
 class My_fd_collection {
 public:

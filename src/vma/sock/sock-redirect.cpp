@@ -3286,7 +3286,7 @@ int Sockfd_tcp::modify_qp_to_rts(struct ibv_qp *qp)
     attr.max_rd_atomic = 1;
     flags = IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
             IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC;
-    rc = vma_ibv_modify_qp(qp, &attr, flags);
+    rc = ibv_modify_qp(qp, &attr, flags);
     if(rc)
     {
         fprintf(stderr, "failed to modify QP state to RTS\n");
@@ -3647,7 +3647,7 @@ int Sockfd_tcp::socket(){
 }
 
 int Sockfd_tcp::accept(){
-	estable_rdma_connect(2);// gidindex 144 2
+	estable_rdma_connect(4);// gidindex 144 4
 	post_receive();
 	//poll_completion();
 	return m_fd;
@@ -3657,7 +3657,7 @@ int Sockfd_tcp::accept(){
 int Sockfd_tcp::connect(){
 	//如何区分144和155，如何让各自找到自己对应的gid index，这是一个问题
 
-	estable_rdma_connect(4);// gidindex 155 4
+	estable_rdma_connect(2);// gidindex 155 2
 	post_receive();
 	//post_receive();
 	//poll_completion();
