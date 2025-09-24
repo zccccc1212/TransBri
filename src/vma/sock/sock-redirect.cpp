@@ -852,6 +852,8 @@ int socket_internal(int __domain, int __type, int __protocol, bool check_offload
 		printf("my_g_p_fd_collection is null \n");
 		return fd;
 	}
+
+
 	if(ret == 1)//add sockfd succeed
 	{
 		printf("add sockfd succeed\n");
@@ -938,14 +940,24 @@ int listen(int __fd, int backlog)
 {
 	srdr_logdbg_entry("fd=%d, backlog=%d", __fd, backlog);
 
+
+
+
+	
 		// zc add
+
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.listen) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
+
 	int ret = orig_os_api.listen(__fd, backlog);
 
 	Sockfd_tcp* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
-	p_socket->listen(backlog);
-	//printf("Contents of server's buffer: '%s'\n", res.buf);
 
+	if(p_socket){
+		p_socket->listen(backlog);
+	}
 	return ret;
 
 
@@ -977,18 +989,24 @@ EXPORT_SYMBOL
 int accept(int __fd, struct sockaddr *__addr, socklen_t *__addrlen)
 {
 	//zc add
+
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.accept) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
+
 	int myfd = orig_os_api.accept(__fd, __addr, __addrlen);
 
 	my_g_p_fd_collection->add_socketfd(myfd);
 
 	Sockfd_tcp* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(myfd);
-	p_socket->accept();
-	//printf("Contents of server's buffer: '%s'\n", res.buf);
+	if(p_socket){
+		p_socket->accept();
+	}
 
 	return myfd;
 
-
+//
 
 
 	socket_fd_api* p_socket_object = NULL;
@@ -1035,9 +1053,10 @@ int bind(int __fd, const struct sockaddr *__addr, socklen_t __addrlen)
 
 	Sockfd_tcp* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
-	p_socket->bind(__addr,__addrlen);
-	//printf("Contents of server's buffer: '%s'\n", res.buf);
-
+	if(p_socket){
+		p_socket->bind(__addr,__addrlen);
+	}
+	
 	return ret;
 	//
 
@@ -1087,12 +1106,18 @@ EXPORT_SYMBOL
 int connect(int __fd, const struct sockaddr *__to, socklen_t __tolen)
 {
 
-		// zc add
+
+	// zc add
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.connect) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
 	int ret = orig_os_api.connect(__fd, __to, __tolen);
 
 	Sockfd_tcp* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
-	p_socket->connect();
+	if(p_socket){
+		p_socket->connect();
+	}
 	//printf("Contents of server's buffer: '%s'\n", res.buf);
 
 	return ret;
@@ -1451,11 +1476,18 @@ ssize_t read(int __fd, void *__buf, size_t __nbytes)
 
 
 	// zc add
-	//int ret = orig_os_api.connect(__fd, __to, __tolen);
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.read) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
+	
 
 	Sockfd_tcp* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
-	return p_socket->read(__buf,  __nbytes);
+	if(p_socket){
+		return p_socket->read(__buf,  __nbytes);
+	}
+
+	return orig_os_api.read(__fd, __buf, __nbytes);
 	//printf("Contents of server's buffer: '%s'\n", res.buf);
 
 	//return ret;
@@ -1816,7 +1848,15 @@ ssize_t write(int __fd, __const void *__buf, size_t __nbytes)
 	//zc add 
 	Sockfd_tcp* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
-	return p_socket->write(__buf, __nbytes);
+	if(p_socket){
+		return p_socket->write(__buf, __nbytes);
+	}
+
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.write) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
+
+	return orig_os_api.write(__fd, __buf, __nbytes);
 
 
 
@@ -1881,8 +1921,16 @@ ssize_t send(int __fd, __const void *__buf, size_t __nbytes, int __flags)
 	//zc add 
 	Sockfd_tcp* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
-	return p_socket->send(__buf,  __nbytes,  __flags);
+	if(p_socket){
+		return p_socket->send(__buf,  __nbytes,  __flags);
+	}
+	
 
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.send) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
+
+	return orig_os_api.send(__fd, __buf, __nbytes, __flags);
 
 
 	socket_fd_api* p_socket_object = NULL;
