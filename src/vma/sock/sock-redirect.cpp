@@ -75,6 +75,9 @@ using namespace std;
 #define MSG_SIZE 64
 #define MR_SIZE 6400
 
+#define RECV_SIZE	100
+
+
 #define MODULE_NAME 		"srdr:"
 
 #define srdr_logpanic		__log_panic
@@ -3068,7 +3071,7 @@ Sockfd_tcp::~Sockfd_tcp(){
 }
 
 
-int Sockfd_tcp::post_send()
+int Sockfd_tcp::post_send(size_t __nbytes)
 {
     struct ibv_send_wr sr;
     struct ibv_sge sge;
@@ -3081,7 +3084,7 @@ int Sockfd_tcp::post_send()
 
 
     sge.addr = (uintptr_t)my_res.send_buf;
-    sge.length = MSG_SIZE;
+    sge.length = __nbytes;
     sge.lkey = my_res.send_mr->lkey;
 
     /* prepare the send work request */
@@ -3121,7 +3124,7 @@ int Sockfd_tcp::post_receive()
     /* prepare the scatter/gather entry */
     memset(&sge, 0, sizeof(sge));
     sge.addr = (uintptr_t)my_res.recv_buf;
-    sge.length = MSG_SIZE;
+    sge.length = RECV_SIZE;
     sge.lkey = my_res.recv_mr->lkey;
 
     /* prepare the receive work request */
@@ -3159,8 +3162,6 @@ int Sockfd_tcp::poll_completion()
     do
     {
         poll_result = ibv_poll_cq(my_res.cq, 1, &wc);
-
-
 		
 /*
 		uint64_t wr_id = wc.wr_id;
@@ -3682,7 +3683,7 @@ int Sockfd_tcp::listen(int backlog){
 
 ssize_t Sockfd_tcp::write( __const void *__buf, size_t __nbytes){
 	memcpy(my_res.send_buf,__buf,__nbytes);
-	post_send();
+	post_send(__nbytes);
 	int ret = poll_completion();
 	if(ret == 4){
 		printf("rdma send success\n");
@@ -3703,7 +3704,7 @@ ssize_t Sockfd_tcp::read(void *__buf, size_t __nbytes){
 
 ssize_t Sockfd_tcp::send(__const void *__buf, size_t __nbytes, int __flags){
 	memcpy(my_res.send_buf,__buf,__nbytes);
-	post_send();
+	post_send(__nbytes);
 	int ret = poll_completion();
 	if(ret == 4){
 		printf("rdma send success\n");

@@ -137,7 +137,7 @@ public:
 	int poll_completion();
 	void resources_init();
 	
-	int post_send();
+	int post_send(size_t __nbytes);
 
 
 	//
