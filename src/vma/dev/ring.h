@@ -142,4 +142,272 @@ protected:
 	int                 m_if_index;     /* Interface index */
 };
 
+
+
+//zc add
+/* structure to exchange data which is needed to connect the QPs */
+struct cm_con_data_t
+{
+    uint64_t addr;        /* Buffer address */
+    uint32_t rkey;        /* Remote key */
+    uint32_t qp_num;      /* QP number */
+    uint16_t lid;         /* LID of the IB port */
+    uint8_t gid[16];      /* gid */
+} __attribute__((packed));
+
+/* structure of system resources */
+struct resources
+{
+
+};
+
+// zc add
+//每个socekt fd对应一个sockfd_tcp,每个sockfd_tcp对应一个sor connection，通过unordered_map找，而不是直接存在sockfd_tcp的实例内，只有当建立好连接的时候才初始化sor connection,避免资源浪费
+//每个sor connection 维护两个ringbuffer，分别是recv和send，后续可以考虑融合为一个
+
+// ringbuffer类中不需要关注是不是mr，只需要我们在初始化ringbuffer的时候通过ibv_reg_mr注册成MR即可
+class RingBuffer {
+private:
+    std::vector<unsigned char> buffer_;
+    size_t capacity_;
+    size_t head_;  // 读取位置
+    size_t tail_;  // 写入位置
+    size_t size_;  // 当前数据量
+
+public:
+    // 禁用拷贝和移动构造
+    RingBuffer(const RingBuffer&) = delete;
+    RingBuffer& operator=(const RingBuffer&) = delete;
+    RingBuffer(RingBuffer&&) = delete;
+    RingBuffer& operator=(RingBuffer&&) = delete;
+
+    // 构造函数 - 指定容量
+    explicit RingBuffer(size_t capacity) 
+        : capacity_(capacity), head_(0), tail_(0), size_(0) {
+        if (capacity == 0) {
+            throw std::invalid_argument("Capacity must be greater than 0");
+        }
+        buffer_.resize(capacity);
+		// 申请完内存以后注册成MR
+    }
+
+    ~RingBuffer() = default;
+
+    // 获取缓冲区总容量
+    size_t capacity() const { return capacity_; }
+    
+    // 获取当前数据量
+    size_t size() const { return size_; }
+    
+    // 获取剩余空间
+    size_t available() const { return capacity_ - size_; }
+    
+    // 检查是否为空
+    bool empty() const { return size_ == 0; }
+    
+    // 检查是否已满
+    bool full() const { return size_ == capacity_; }
+
+    // 写入数据 - 返回实际写入的字节数
+    size_t write(const void* data, size_t len) {
+        if (len == 0 || full()) return 0;
+        
+        len = std::min(len, available());
+        if (len == 0) return 0;
+
+        const unsigned char* src = static_cast<const unsigned char*>(data);
+        
+        // 计算连续可写入空间
+        size_t contiguous = capacity_ - tail_;
+        size_t to_write = std::min(len, contiguous);
+        
+        // 写入第一部分
+        std::memcpy(&buffer_[tail_], src, to_write);
+        
+        // 如果需要回绕写入剩余部分
+        if (to_write < len) {
+            std::memcpy(&buffer_[0], src + to_write, len - to_write);
+        }
+        
+        tail_ = (tail_ + len) % capacity_;
+        size_ += len;
+        
+        return len;
+    }
+
+    // 读取数据但不移动读指针 - 返回实际读取的字节数
+    size_t peek(void* data, size_t len) const {
+        if (len == 0 || empty()) return 0;
+        
+        len = std::min(len, size_);
+        unsigned char* dst = static_cast<unsigned char*>(data);
+        
+        // 计算连续可读取空间
+        size_t contiguous = capacity_ - head_;
+        size_t to_read = std::min(len, contiguous);
+        
+        // 读取第一部分
+        std::memcpy(dst, &buffer_[head_], to_read);
+        
+        // 如果需要回绕读取剩余部分
+        if (to_read < len) {
+            std::memcpy(dst + to_read, &buffer_[0], len - to_read);
+        }
+        
+        return len;
+    }
+
+    // 读取数据并移动读指针 - 返回实际读取的字节数
+    size_t read(void* data, size_t len) {
+        size_t bytes_read = peek(data, len);
+        if (bytes_read > 0) {
+            head_ = (head_ + bytes_read) % capacity_;
+            size_ -= bytes_read;
+        }
+        return bytes_read;
+    }
+
+    // 丢弃数据 - 返回实际丢弃的字节数
+    size_t discard(size_t len) {
+        if (len == 0 || empty()) return 0;
+        
+        len = std::min(len, size_);
+        head_ = (head_ + len) % capacity_;
+        size_ -= len;
+        
+        return len;
+    }
+
+    // 清空缓冲区
+    void clear() {
+        head_ = tail_ = 0;
+        size_ = 0;
+    }
+
+    // 获取连续可读空间的大小和指针（用于零拷贝发送）
+    size_t getContiguousReadBlock(const unsigned char** data) const {
+        if (empty()) {
+            *data = nullptr;
+            return 0;
+        }
+        
+        *data = &buffer_[head_];
+        
+        // 计算从head到缓冲区末尾的连续空间
+        size_t contiguous = capacity_ - head_;
+        
+        // 如果数据没有回绕，返回实际连续大小
+        if (head_ < tail_ || (head_ >= tail_ && tail_ == 0)) {
+            return std::min(contiguous, size_);
+        } else {
+            // 数据回绕了，连续空间到缓冲区末尾
+            return contiguous;
+        }
+    }
+
+    // 获取连续可写空间的大小和指针（用于零拷贝接收）
+    size_t getContiguousWriteBlock(unsigned char** data) {
+        if (full()) {
+            *data = nullptr;
+            return 0;
+        }
+        
+        *data = &buffer_[tail_];
+        
+        // 计算从tail到缓冲区末尾的连续空间
+        size_t contiguous = capacity_ - tail_;
+        
+        // 如果空间没有回绕，返回实际连续大小
+        if (tail_ < head_ || (tail_ >= head_ && head_ == 0)) {
+            return std::min(contiguous, available());
+        } else {
+            // 空间回绕了，连续空间到缓冲区末尾
+            return contiguous;
+        }
+    }
+
+    // 在零拷贝读取后移动读指针
+    void commitRead(size_t len) {
+        if (len > size_) {
+            throw std::invalid_argument("Commit length exceeds available data");
+        }
+        head_ = (head_ + len) % capacity_;
+        size_ -= len;
+    }
+
+    // 在零拷贝写入后移动写指针
+    void commitWrite(size_t len) {
+        if (len > available()) {
+            throw std::invalid_argument("Commit length exceeds available space");
+        }
+        tail_ = (tail_ + len) % capacity_;
+        size_ += len;
+    }
+
+    // 打印状态（调试用）
+    void printStats() const {
+        printf("RingBuffer Stats: Capacity=%zu, Size=%zu, Available=%zu, Head=%zu, Tail=%zu\n",
+               capacity_, size_, available(), head_, tail_);
+    }
+};
+
+
+class SoR_connection{
+private:
+	int m_fd;	
+
+	struct resources m_res;
+	int m_qpn;
+	int m_recv_cqn;
+	int m_send_cqn;
+	int send_buffer_total;
+	int recv_buffer_total;
+	int send_buffer_current;
+	int recv_buffer_current;
+	
+
+	union ibv_gid my_gid;
+	int m_gidindex;
+
+	RingBuffer * send_rb;
+	RingBuffer * recv_rb;
+public:
+	SoR_connection();
+	~SoR_connection();
+
+
+
+	
+
+	int post_send();
+	int poll_completion();
+	int post_receive();
+
+
+	int connect_to_peer();
+	
+	int sock_sync_data(int xfer_size, char *local_data, char *remote_data);
+	int create_rdma_resources();
+
+	int modify_qp();
+	int modify_qp_to_init();
+	int modify_qp_to_rtr();
+	int modify_qp_to_rts();
+	
+	size_t create_buffer();
+	
+
+
+};
+
+class SoRconn_map{
+private:
+
+
+public:
+
+};
+
+
+
 #endif /* RING_H */

@@ -999,7 +999,8 @@ int accept(int __fd, struct sockaddr *__addr, socklen_t *__addrlen)
 
 	int myfd = orig_os_api.accept(__fd, __addr, __addrlen);
 
-	my_g_p_fd_collection->add_socketfd(myfd);
+	if(my_g_p_fd_collection)
+		my_g_p_fd_collection->add_socketfd(myfd);
 
 	Sockfd_tcp* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(myfd);
@@ -3648,6 +3649,9 @@ int Sockfd_tcp::socket(){
 }
 
 int Sockfd_tcp::accept(){
+
+	
+
 	estable_rdma_connect(4);// gidindex 144 4
 	post_receive();
 	//poll_completion();
@@ -3675,9 +3679,11 @@ int Sockfd_tcp::bind(const sockaddr *__addr, socklen_t __addrlen){
 }
 
 int Sockfd_tcp::listen(int backlog){
+	
 	if(backlog){
 
 	}
+	islistenserver = true;
 	return 0;
 }
 
@@ -3720,3 +3726,5 @@ ssize_t Sockfd_tcp::send(__const void *__buf, size_t __nbytes, int __flags){
 // zc add
 extern My_fd_collection* my_g_p_fd_collection;
 extern fd_collection* g_p_fd_collection;
+
+extern ;

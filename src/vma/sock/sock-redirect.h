@@ -158,14 +158,15 @@ public:
 
 private:
 	int m_fd;
-	struct resources my_res;
-	int m_qpn;
-	int m_recv_cqn;
-	int m_send_cqn;
-	int send_buffer_total;
-	int recv_buffer_total;
-	int send_buffer_current;
-	int recv_buffer_current;
+	int m_sorcon_key;// sor connection key 这里也使用fd来索引比较好吧？毕竟一个socket我们只让他对应一条sor conn，不过还是区分一下，值实际上就等于fd
+	struct resources m_res;
+
+	bool islistenserver;// 判断是否是服务器，并且是否已经调用了listen进入监听状态
+	bool isconnected;// 判断是否已经建立好了sor连接
+
+
+
+
 
 
 };
