@@ -3697,6 +3697,7 @@ ssize_t Sockfd_tcp::write( __const void *__buf, size_t __nbytes){
 	return __nbytes;
 }
 ssize_t Sockfd_tcp::read(void *__buf, size_t __nbytes){
+	//在poll之前和之后加打印时间的语句，看看时间消耗在哪里了
 	
 	int ret = poll_completion();
 	if(ret == 3){
