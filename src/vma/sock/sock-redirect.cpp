@@ -3651,6 +3651,8 @@ int Sockfd_tcp::socket(){
 int Sockfd_tcp::accept(){
 
 	
+	//add sor conn
+
 
 	estable_rdma_connect(4);// gidindex 144 4
 	post_receive();
@@ -3727,5 +3729,9 @@ ssize_t Sockfd_tcp::send(__const void *__buf, size_t __nbytes, int __flags){
 // zc add
 extern My_fd_collection* my_g_p_fd_collection;
 extern fd_collection* g_p_fd_collection;
+extern SoRconn_collection* g_p_conn_collection;
+
+
+
 
 extern ;

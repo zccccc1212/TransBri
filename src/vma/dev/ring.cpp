@@ -485,5 +485,70 @@ int SoR_connection::post_send(){
 
 
 
+SoRconn_collection::SoRconn_collection(){
+
+}
+
+SoRconn_collection::~SoRconn_collection(){
+    clear();
+}
+
+
+
+int SoRconn_collection::add_sorconn(int fd /*fd is key*/){
+
+    if(fd < 0){
+        return -1; //fd is invalid
+    }
+
+    auto it = m_conn_map.find(fd);
+    if(it != m_conn_map.end()){
+        return -2; // already exist this fd sor conn
+    }
+    
+    try{
+        SoR_connection* sorconn = new SoR_connection(fd);
+        m_conn_map[fd] = sorconn;
+        return 1;
+    } catch (const std::exception& e){
+        return -3;
+    }
+}
+
+SoR_connection* SoRconn_collection::find_sorconn(int fd){
+    auto it = m_conn_map.find(fd);
+    if(it == m_conn_map.end()){
+        return nullptr;
+    }
+    return it->second;
+}
+
+int  SoRconn_collection::remove_sorconn(int fd){
+    auto it = m_conn_map.find(fd);
+    if(it == m_conn_map.end()){// 本来就不存在
+        return -1; 
+    }
+    delete it->second; // 先使用delete删除对应的new所指向的资源
+
+    m_conn_map.erase(it);
+    return 1;// 删除成功
+
+}
+
+
+size_t SoRconn_collection::size() const{
+    return m_conn_map.size();
+}
+
+void SoRconn_collection::clear(){
+    for(auto & pair : m_conn_map){
+
+        delete pair.second;// 这是为了删除实例，释放资源所占的空间
+    }
+    m_conn_map.clear();
+}
+
+
+
 
 

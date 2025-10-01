@@ -727,7 +727,7 @@ Sockfd_tcp* My_fd_collection::find_socketfd(int fd) {
     return nullptr; // 未找到
 }
 
-bool My_fd_collection::remove_socketfd(int fd) {
+int My_fd_collection::remove_socketfd(int fd) {
     auto it = m_fd_map.find(fd);
     if (it != m_fd_map.end()) {
         // 关闭socket
@@ -738,9 +738,9 @@ bool My_fd_collection::remove_socketfd(int fd) {
         
         // 从map中移除
         m_fd_map.erase(it);
-        return true;
+        return 1;
     }
-    return false;
+    return -1;
 }
 
 size_t My_fd_collection::size() const {

@@ -96,7 +96,7 @@ public:
 
 private:
     // 使用map存储fd到Sockfd_tcp指针的映射
-    std::map<int, Sockfd_tcp*> m_fd_map;
+    std::unordered_map<int, Sockfd_tcp*> m_fd_map;
 };
 
 
@@ -338,6 +338,8 @@ inline socket_fd_api* fd_collection_get_sockfd(int fd)
 		return g_p_fd_collection->get_sockfd(fd);
 	return NULL;
 }
+
+
 
 inline epfd_info* fd_collection_get_epfd(int fd)
 {

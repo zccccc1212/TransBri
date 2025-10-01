@@ -400,14 +400,42 @@ public:
 
 };
 
-class SoRconn_map{
-private:
-
-
+class SoRconn_collection{
 public:
+    SoRconn_collection();
+    ~SoRconn_collection();
+
+    // 添加socket文件描述符对应的sor conn 到集合
+    int add_sorconn(int fd);
+    
+    // 根据fd查找对应的sor conn
+    Sockfd_tcp* find_sorconn(int fd);
+    
+    // 从集合中移除并关闭对应的sor conn
+    int  remove_sorconn(int fd);
+    
+    // 获取当前这个总共建立了多少条sor conn
+    size_t size() const;
+    
+    // 清空集合并关闭所有sor conn
+    void clear();
+
+private:
+    // 使用map存储fd到Sockfd_tcp指针的映射
+    std::unordered_map<int, SoR_connection*> m_conn_map;
 
 };
 
 
+
+// zc add
+extern SoRconn_collection* g_p_conn_collection;
+
+inline SoR_connection* sorconn_collection_get_conn(int fd)
+{
+	if (g_p_conn_collection) 
+		return g_p_conn_collection->find_sorconn(fd);
+	return NULL;
+}
 
 #endif /* RING_H */
