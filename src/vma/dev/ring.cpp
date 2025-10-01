@@ -117,7 +117,7 @@ int SoR_connection::create_rdma_resources(){
 	
 	// 这里应该是找到正确的rdma设备，在我们的服务器现在有多张rdma网卡的情况下，这里后续需要想办法区分一下，只能用英伟达的网卡
 	// 好像不对，如果使用RC模式的话，照理来说intel的网卡也是可以的，这里需要区分吗？
-	ib_dev = dev_list[3];
+	ib_dev = dev_list[1];
 
 	/* get device handle */
     my_res.ib_ctx = ibv_open_device(ib_dev);
@@ -216,7 +216,7 @@ int SoR_connection::create_rdma_resources(){
     qp_init_attr.sq_sig_all = 1;
     qp_init_attr.send_cq = my_res.cq;
     qp_init_attr.recv_cq = my_res.cq;
-    qp_init_attr.cap.max_send_wr = 1;
+    qp_init_attr.cap.max_send_wr = 1;//TODO : set to approperiate wr number
     qp_init_attr.cap.max_recv_wr = 1;
     qp_init_attr.cap.max_send_sge = 1;
     qp_init_attr.cap.max_recv_sge = 1;
@@ -305,6 +305,7 @@ int SoR_connection::connect_to_reer(){
 	struct cm_con_data_t local_con_data;
     struct cm_con_data_t remote_con_data;
     struct cm_con_data_t tmp_con_data;
+
 
 	//prepare local rdma data to trans 
 	local_con_data.addr = htonll((uintptr_t)my_res.recv_buf);
@@ -409,7 +410,7 @@ int SoR_connection::modify_qp_to_init(){
     int rc;
     memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_INIT;
-    attr.port_num = 0;
+    attr.port_num = 1;
     attr.pkey_index = 0;
     attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
     flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;

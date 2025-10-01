@@ -379,7 +379,7 @@ public:
 
 	
 
-	int post_send();
+	int post_send(__const void *__buf, size_t __nbytes);
 	int poll_completion();
 	int post_receive();
 

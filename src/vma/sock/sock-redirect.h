@@ -126,20 +126,6 @@ public:
 	Sockfd_tcp(int fd);
 	virtual ~Sockfd_tcp();
 
-	// zc add
-	int sock_sync_data(int sock, int xfer_size, char *local_data, char *remote_data);
-	int estable_rdma_connect(int gidindex);
-	int create_rdma_resources();
-	int modify_qp_to_init(struct ibv_qp *qp);
-	int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dlid, uint8_t *dgid, int gidindex);
-	int modify_qp_to_rts(struct ibv_qp *qp);
-	int post_receive();
-	int poll_completion();
-	void resources_init();
-	
-	int post_send(size_t __nbytes);
-
-
 	//
 
 
@@ -158,7 +144,7 @@ public:
 
 private:
 	int m_fd;
-	int m_sorcon_key;// sor connection key 这里也使用fd来索引比较好吧？毕竟一个socket我们只让他对应一条sor conn，不过还是区分一下，值实际上就等于fd
+	int m_sorconn_key;// sor connection key 这里也使用fd来索引比较好吧？毕竟一个socket我们只让他对应一条sor conn，不过还是区分一下，值实际上就等于fd
 	struct resources m_res;
 
 	bool islistenserver;// 判断是否是服务器，并且是否已经调用了listen进入监听状态
