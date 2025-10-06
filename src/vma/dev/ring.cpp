@@ -39,6 +39,18 @@
 #undef  MODULE_HDR
 #define MODULE_HDR      MODULE_NAME "%d:%s() "
 
+
+//zc add
+/* poll CQ timeout in millisec (2 seconds) */
+#define MAX_POLL_CQ_TIMEOUT 2000
+
+#define MSG_SIZE 64
+#define MR_SIZE 6400
+
+#define RECV_SIZE	100 //rdma recv 操作的大小，可能设置成MTU好一点
+
+
+
 ring::ring() :
 	m_p_n_rx_channel_fds(NULL), m_parent(NULL)
 {
@@ -160,46 +172,14 @@ int SoR_connection::create_rdma_resources(){
         goto resources_create_exit;
     }
 
-    /* allocate the memory buffer that will hold the data */
-	// recv buffer
-    size = MR_SIZE;
-    my_res.recv_buf = (char *) malloc(size);
-    if(!my_res.recv_buf)
-    {
-        fprintf(stderr, "failed to malloc %Zu bytes to memory buffer\n", size);
-        rc = 1;
-        goto resources_create_exit;
-    }
-    memset(my_res.recv_buf, 0 , size);
+    //create ringbuffer and mr and rigister mr
+    int ret = create_ringbuffer(MR_SIZE);
+    if(ret){
 
-    /* register the memory buffer */
+    }
     mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE ;
-    my_res.recv_mr = ibv_reg_mr(my_res.pd, my_res.recv_buf, size, mr_flags);
-	if(!my_res.recv_mr)
-    {
-        fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
-        rc = 1;
-        goto resources_create_exit;
-    }
-	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-            my_res.recv_buf, my_res.recv_mr->lkey, my_res.recv_mr->rkey, mr_flags);
 
-	// send buffer
-	/* allocate the memory buffer that will hold the data */
-    size = MR_SIZE;
-    my_res.send_buf = (char *) malloc(size);
-    if(!my_res.send_buf)
-    {
-        fprintf(stderr, "failed to malloc %Zu bytes to memory buffer\n", size);
-        rc = 1;
-        goto resources_create_exit;
-    }
-    memset(my_res.send_buf, 0 , size);
-
-
-    /* register the memory buffer */
-    mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE ;
-    my_res.send_mr = ibv_reg_mr(my_res.pd, my_res.send_buf, size, mr_flags);
+    my_res.send_mr = ibv_reg_mr(my_res.pd, m_send_rb->getBufferPtr(), MR_SIZE, mr_flags);
 	if(!my_res.send_mr)
     {
         fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
@@ -208,7 +188,16 @@ int SoR_connection::create_rdma_resources(){
     }
 	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
             my_res.send_buf, my_res.send_mr->lkey, my_res.send_mr->rkey, mr_flags);
-	
+
+    my_res.recv_mr = ibv_reg_mr(my_res.pd, m_recv_rb->getBufferPtr(), MR_SIZE, mr_flags);
+    if(!my_res.recv_buf)
+    {
+        fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
+        rc = 1;
+        goto resources_create_exit;
+    }
+	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
+            my_res.recv_buf, my_res.recv_mr->lkey, my_res.recv_mr->rkey, mr_flags);
 
 	/* create the Queue Pair */
 	memset(&qp_init_attr, 0, sizeof(qp_init_attr));
@@ -216,8 +205,8 @@ int SoR_connection::create_rdma_resources(){
     qp_init_attr.sq_sig_all = 1;
     qp_init_attr.send_cq = my_res.cq;
     qp_init_attr.recv_cq = my_res.cq;
-    qp_init_attr.cap.max_send_wr = 1;//TODO : set to approperiate wr number
-    qp_init_attr.cap.max_recv_wr = 1;
+    qp_init_attr.cap.max_send_wr = 100;//TODO : set to approperiate wr number
+    qp_init_attr.cap.max_recv_wr = 100;
     qp_init_attr.cap.max_send_sge = 1;
     qp_init_attr.cap.max_recv_sge = 1;
     my_res.qp = ibv_create_qp(my_res.pd, &qp_init_attr);
@@ -480,9 +469,159 @@ int SoR_connection::modify_qp_to_rts(){
     return rc;
 }
 
-int SoR_connection::post_send(){
+int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
+    struct ibv_send_wr sr;
+    struct ibv_sge sge;
+    struct ibv_send_wr *bad_wr = NULL;
+    int rc;
+
+
+
+    /* prepare the scatter/gather entry */
+    memset(&sge, 0, sizeof(sge));
+
+    size_t cursendsize = m_send_rb->getContiguousWriteBlock()
+
+    size_t size =  m_send_rb->write(buf,__nbytes);
+    if(size < __nbytes){
+
+    }
+
+
+
+    sge.addr = (uintptr_t)m_send_rb->getDataPtr();
+    sge.length = size;
+    sge.lkey = my_res.send_mr->lkey;
+
+    /* prepare the send work request */
+    memset(&sr, 0, sizeof(sr));
+    sr.next = NULL;
+    sr.wr_id = 0;//尝试用id来区分，send统一为10，recv统一为11
+    sr.sg_list = &sge;
+    sr.num_sge = 1;
+    sr.opcode = IBV_WR_SEND;
+    sr.send_flags = IBV_SEND_SIGNALED;
+
+    /* there is a Receive Request in the responder side, so we won't get any into RNR flow */
+    rc = ibv_post_send(my_res.qp, &sr, &bad_wr);
+    if(rc)
+    {
+        fprintf(stderr, "failed to post SR\n");
+    }
+    else
+    {
+        fprintf(stdout, "Send Request was posted\n");
+    }
+    return rc;
+}
+
+int SoR_connection::post_receive(){
+    struct ibv_recv_wr rr;
+    struct ibv_sge sge;
+    struct ibv_recv_wr *bad_wr;
+    int rc;
+
+    /* prepare the scatter/gather entry */
+    memset(&sge, 0, sizeof(sge));
+
+
+    sge.addr = (uintptr_t)  m_recv_rb->getContiguousWriteBlock();
+    sge.length = RECV_SIZE;
+    sge.lkey = my_res.recv_mr->lkey;
+
+    /* prepare the receive work request */
+    memset(&rr, 0, sizeof(rr));
+    rr.next = NULL;
+    rr.wr_id = 0;//尝试用id来区分，send统一为10，recv统一为11
+    rr.sg_list = &sge;
+    rr.num_sge = 1;
+
+    /* post the Receive Request to the RQ */
+    rc = ibv_post_recv(my_res.qp, &rr, &bad_wr);
+    if(rc)
+    {
+        fprintf(stderr, "failed to post RR\n");
+    }
+    else
+    {
+        fprintf(stdout, "Receive Request was posted\n");
+    }
+    return rc;
+}
+
+int SoR_connection::poll_completion(){
+    struct ibv_wc wc;
+    unsigned long start_time_msec;
+    unsigned long cur_time_msec;
+    struct timeval cur_time;
+    int poll_result;
+    int rc = 0;
+    /* poll the completion for a while before giving up of doing it .. */
+    gettimeofday(&cur_time, NULL);
+    start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+    do
+    {
+        poll_result = ibv_poll_cq(my_res.cq, 1, &wc);
+		
+/*
+		uint64_t wr_id = wc.wr_id;
+		printf("wr_id  : %lu\n", wr_id);
+*/
+        gettimeofday(&cur_time, NULL);
+        cur_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+    }
+    while((poll_result == 0) && ((cur_time_msec - start_time_msec) < MAX_POLL_CQ_TIMEOUT));
+
+    if(poll_result < 0)
+    {
+        /* poll CQ failed */
+        fprintf(stderr, "poll CQ failed\n");
+        rc = 1;
+    }
+    else if(poll_result == 0)
+    {
+        /* the CQ is empty */
+        fprintf(stderr, "completion wasn't found in the CQ after timeout\n");
+        rc = 1;
+    }
+    else
+    {
+        /* CQE found */
+        fprintf(stdout, "completion was found in CQ with status 0x%x\n", wc.status);
+        /* check the completion status (here we don't care about the completion opcode */
+        if(wc.status != IBV_WC_SUCCESS)
+        {
+            fprintf(stderr, "got bad completion with status: 0x%x, vendor syndrome: 0x%x\n", 
+					wc.status, wc.vendor_err);
+            rc = 1;
+        }
+
+
+        //update send and recv window 
+        
+		if(wc.opcode & IBV_WC_RECV){
+			printf("rdma recv success and recv wr_id is %ld \n", wc.wr_id);
+			return 3;	
+		}
+		if(wc.opcode & IBV_WC_SEND){
+			printf("rdma send success and send wr_id is %ld \n", wc.wr_id);
+			return 4;
+		}
+    }
+    return rc;
+}
+
+
+int SoR_connection::create_ringbuffer(size_t capacity){
+    RingBuffer * sendbuf = new RingBuffer(capacity);
+    RingBuffer * recvbuf = new RingBuffer(capacity);
+    m_send_rb = sendbuf;
+    m_recv_rb = recvbuf;
+
 
 }
+
+
 
 
 

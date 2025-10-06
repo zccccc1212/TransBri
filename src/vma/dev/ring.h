@@ -158,7 +158,16 @@ struct cm_con_data_t
 /* structure of system resources */
 struct resources
 {
-
+    struct ibv_device_attr device_attr; /* Device attributes */
+    struct ibv_port_attr port_attr;     /* IB port attributes */
+    struct cm_con_data_t remote_props;  /* values to connect to remote side */
+    struct ibv_context *ib_ctx;         /* device handle */
+    struct ibv_pd *pd;                  /* PD handle */
+    struct ibv_cq *cq;                  /* CQ handle */
+    struct ibv_qp *qp;                  /* QP handle */
+    struct ibv_mr *recv_mr;                  /* MR handle for recv buf */
+	struct ibv_mr *send_mr;                  /* MR handle for send buf */
+    int sock;                           /* TCP socket file descriptor */
 };
 
 // zc add
@@ -166,6 +175,9 @@ struct resources
 //每个sor connection 维护两个ringbuffer，分别是recv和send，后续可以考虑融合为一个
 
 // ringbuffer类中不需要关注是不是mr，只需要我们在初始化ringbuffer的时候通过ibv_reg_mr注册成MR即可
+//  但是这个ringbuffer是封装好的，外面没办法访问里面的数据地址，只能直接操作进行拷贝数据
+// 仔细考虑过后，数据发送的接口也放到ringbuffer类中，一层层调用ringbuffer来进行实际的数据发送
+
 class RingBuffer {
 private:
     std::vector<unsigned char> buffer_;
@@ -173,6 +185,7 @@ private:
     size_t head_;  // 读取位置
     size_t tail_;  // 写入位置
     size_t size_;  // 当前数据量
+
 
 public:
     // 禁用拷贝和移动构造
@@ -188,7 +201,7 @@ public:
             throw std::invalid_argument("Capacity must be greater than 0");
         }
         buffer_.resize(capacity);
-		// 申请完内存以后注册成MR
+        memset(buffer_, 0 , capacity_)
     }
 
     ~RingBuffer() = default;
@@ -204,9 +217,56 @@ public:
     
     // 检查是否为空
     bool empty() const { return size_ == 0; }
-    
+
     // 检查是否已满
     bool full() const { return size_ == capacity_; }
+
+    // 获取当前有效数据的起始地址（head位置）
+    unsigned char* getDataPtr() {
+        if (empty()) {
+            return nullptr;
+        }
+        return &buffer_[head_];
+    }
+
+    // 获取当前有效数据的常量起始地址
+    const unsigned char* getDataPtr() const {
+        if (empty()) {
+            return nullptr;
+        }
+        return &buffer_[head_];
+    }
+
+    // 获取整个缓冲区的起始地址（用于MR注册）
+    unsigned char* getBufferPtr() {
+        return buffer_.data();
+    }
+
+    // 获取整个缓冲区的常量起始地址
+    const unsigned char* getBufferPtr() const {
+        return buffer_.data();
+    }
+
+    // 获取当前有效数据的连续长度（从head到缓冲区末尾或到tail）
+    size_t getContiguousDataLength() const {
+        if (empty()) {
+            return 0;
+        }
+        
+        // 如果数据没有回绕
+        if (head_ <= tail_) {
+            return tail_ - head_;
+        } else {
+            // 数据回绕了，连续长度到缓冲区末尾
+            return capacity_ - head_;
+        }
+    }
+
+    // 获取头部位置（调试用）
+    size_t getHead() const { return head_; }
+
+    // 获取尾部位置（调试用）
+    size_t getTail() const { return tail_; }
 
     // 写入数据 - 返回实际写入的字节数
     size_t write(const void* data, size_t len) {
@@ -284,14 +344,29 @@ public:
         size_ = 0;
     }
 
-    // 获取连续可读空间的大小和指针（用于零拷贝发送）
-    size_t getContiguousReadBlock(const unsigned char** data) const {
+    // 获取连续可读空间的指针
+    const unsigned char* getContiguousReadBlock() const {
         if (empty()) {
-            *data = nullptr;
-            return 0;
+            return nullptr;
         }
         
-        *data = &buffer_[head_];
+        return &buffer_[head_];
+    }
+
+    // 获取连续可写空间的指针
+    unsigned char* getContiguousWriteBlock() {
+        if (full()) {
+            return nullptr;
+        }
+        
+        return &buffer_[tail_];
+    }
+
+    // 获取连续可读空间的大小
+    size_t getContiguousReadSize() const {
+        if (empty()) {
+            return 0;
+        }
         
         // 计算从head到缓冲区末尾的连续空间
         size_t contiguous = capacity_ - head_;
@@ -305,14 +380,11 @@ public:
         }
     }
 
-    // 获取连续可写空间的大小和指针（用于零拷贝接收）
-    size_t getContiguousWriteBlock(unsigned char** data) {
+    // 获取连续可写空间的大小
+    size_t getContiguousWriteSize() const {
         if (full()) {
-            *data = nullptr;
             return 0;
         }
-        
-        *data = &buffer_[tail_];
         
         // 计算从tail到缓冲区末尾的连续空间
         size_t contiguous = capacity_ - tail_;
@@ -324,25 +396,7 @@ public:
             // 空间回绕了，连续空间到缓冲区末尾
             return contiguous;
         }
-    }
 
-    // 在零拷贝读取后移动读指针
-    void commitRead(size_t len) {
-        if (len > size_) {
-            throw std::invalid_argument("Commit length exceeds available data");
-        }
-        head_ = (head_ + len) % capacity_;
-        size_ -= len;
-    }
-
-    // 在零拷贝写入后移动写指针
-    void commitWrite(size_t len) {
-        if (len > available()) {
-            throw std::invalid_argument("Commit length exceeds available space");
-        }
-        tail_ = (tail_ + len) % capacity_;
-        size_ += len;
-    }
 
     // 打印状态（调试用）
     void printStats() const {
@@ -369,32 +423,24 @@ private:
 	union ibv_gid my_gid;
 	int m_gidindex;
 
-	RingBuffer * send_rb;
-	RingBuffer * recv_rb;
+	RingBuffer * m_send_rb;
+	RingBuffer * m_recv_rb;
 public:
 	SoR_connection();
-	~SoR_connection();
-
-
-
-	
+	~SoR_connection();	
 
 	int post_send(__const void *__buf, size_t __nbytes);
 	int poll_completion();
 	int post_receive();
 
-
 	int connect_to_peer();
-	
 	int sock_sync_data(int xfer_size, char *local_data, char *remote_data);
 	int create_rdma_resources();
-
 	int modify_qp();
 	int modify_qp_to_init();
 	int modify_qp_to_rtr();
 	int modify_qp_to_rts();
-	
-	size_t create_buffer();
+	int create_ringbuffer(size_t capacity);
 	
 
 
