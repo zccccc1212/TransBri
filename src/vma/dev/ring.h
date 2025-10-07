@@ -34,6 +34,9 @@
 #ifndef RING_H
 #define RING_H
 
+#include <vector>
+#include <mutex>
+
 #include "vma/ib/base/verbs_extra.h"
 #include "vma/proto/flow_tuple.h"
 #include "vma/sock/socket_fd_api.h"
@@ -163,10 +166,11 @@ struct resources
     struct cm_con_data_t remote_props;  /* values to connect to remote side */
     struct ibv_context *ib_ctx;         /* device handle */
     struct ibv_pd *pd;                  /* PD handle */
-    struct ibv_cq *cq;                  /* CQ handle */
+    struct ibv_cq *send_cq;             /* 发送CQ handle */
+    struct ibv_cq *recv_cq;             /* 接收CQ handle */
     struct ibv_qp *qp;                  /* QP handle */
-    struct ibv_mr *recv_mr;                  /* MR handle for recv buf */
-	struct ibv_mr *send_mr;                  /* MR handle for send buf */
+    struct ibv_mr *recv_mr;             /* MR handle for recv buf */
+    struct ibv_mr *send_mr;             /* MR handle for send buf */
     int sock;                           /* TCP socket file descriptor */
 };
 
@@ -177,14 +181,15 @@ struct resources
 // ringbuffer类中不需要关注是不是mr，只需要我们在初始化ringbuffer的时候通过ibv_reg_mr注册成MR即可
 //  但是这个ringbuffer是封装好的，外面没办法访问里面的数据地址，只能直接操作进行拷贝数据
 // 仔细考虑过后，数据发送的接口也放到ringbuffer类中，一层层调用ringbuffer来进行实际的数据发送
-
+// 为了让我们得到cqe以后可以根据cqe中的wr_id找到对应的那一个request操作的数据的缓冲区的地址和长度，我们需要另外一个结构来存储这些信息，并在提交请求的时候将wr_id设为这个结构的地址，方便查询
 class RingBuffer {
 private:
     std::vector<unsigned char> buffer_;
     size_t capacity_;
     size_t head_;  // 读取位置
     size_t tail_;  // 写入位置
-    size_t size_;  // 当前数据量
+    size_t size_;  // 当前所占用的空间的大小
+    size_t true_data_size_; //真正存储了数据的大小
 
 
 public:
@@ -196,7 +201,7 @@ public:
 
     // 构造函数 - 指定容量
     explicit RingBuffer(size_t capacity) 
-        : capacity_(capacity), head_(0), tail_(0), size_(0) {
+        : capacity_(capacity), head_(0), tail_(0), size_(0), true_data_size_(0) {
         if (capacity == 0) {
             throw std::invalid_argument("Capacity must be greater than 0");
         }
@@ -206,12 +211,17 @@ public:
 
     ~RingBuffer() = default;
 
+
+
     // 获取缓冲区总容量
     size_t capacity() const { return capacity_; }
     
-    // 获取当前数据量
+    // 获取所占用的空间的大小
     size_t size() const { return size_; }
     
+    // 获取真正存储的数据量
+    size_t true_data_size() const { return true_data_size_; }
+
     // 获取剩余空间
     size_t available() const { return capacity_ - size_; }
     
@@ -268,8 +278,8 @@ public:
     // 获取尾部位置（调试用）
     size_t getTail() const { return tail_; }
 
-    // 写入数据 - 返回实际写入的字节数
-    size_t write(const void* data, size_t len) {
+    // 写入数据 - 返回实际写入的字节数 flag = 1 for write data, flag = 0 for write len
+    size_t write(const void* data, size_t len,int flag) {
         if (len == 0 || full()) return 0;
         
         len = std::min(len, available());
@@ -287,6 +297,10 @@ public:
         // 如果需要回绕写入剩余部分
         if (to_write < len) {
             std::memcpy(&buffer_[0], src + to_write, len - to_write);
+        }
+        
+        if(flag){
+            true_data_size_ += len;
         }
         
         tail_ = (tail_ + len) % capacity_;
@@ -317,12 +331,16 @@ public:
         return len;
     }
 
-    // 读取数据并移动读指针 - 返回实际读取的字节数
-    size_t read(void* data, size_t len) {
+    // 读取数据并移动读指针 - 返回实际读取的字节数, flag = 1 for write data, flag = 0 for write len
+    size_t read(void* data, size_t len, int flag ) {
         size_t bytes_read = peek(data, len);
         if (bytes_read > 0) {
             head_ = (head_ + bytes_read) % capacity_;
             size_ -= bytes_read;
+        }
+
+        if(flag){
+            true_data_size_ -= len;
         }
         return bytes_read;
     }
@@ -342,6 +360,37 @@ public:
     void clear() {
         head_ = tail_ = 0;
         size_ = 0;
+    }
+
+
+    /**
+     * 在head指针前写入4个字节的数据
+     * 前提条件：调用发生在数据读取后，不会覆盖已有数据，不会发生缓冲区溢出
+     * @param data 要写入的数据指针（必须至少4个字节）
+     * @return 总是返回4（固定写入4个字节）
+     */
+    size_t writeBeforeHead(const void* data) {
+        const unsigned char* src = static_cast<const unsigned char*>(data);
+
+        // 计算新的head位置（向前移动4个位置）
+        size_t new_head = (head_ - 4 + capacity_) % capacity_;
+
+        // 写入4个字节到new_head位置
+        if (new_head + 4 <= capacity_) {
+            // 不需要回绕，连续写入
+            std::memcpy(&buffer_[new_head], src, 4);
+        } else {
+            // 需要回绕写入
+            size_t first_part = capacity_ - new_head;
+            std::memcpy(&buffer_[new_head], src, first_part);
+            std::memcpy(&buffer_[0], src + first_part, 4 - first_part);
+        }
+
+        // 更新head指针和缓冲区大小
+        head_ = new_head;
+        size_ += 4;
+
+        return 4; // 总是写入4个字节
     }
 
     // 获取连续可读空间的指针
@@ -396,7 +445,113 @@ public:
             // 空间回绕了，连续空间到缓冲区末尾
             return contiguous;
         }
+    }
 
+    // 更新 head 指针（当外部直接读取了数据后调用）
+    void updateHead(size_t bytes_processed) {
+        if (bytes_processed > size_) {
+            throw std::invalid_argument("Processed bytes exceed current size");
+        }
+        
+        head_ = (head_ + bytes_processed) % capacity_;
+        size_ -= bytes_processed;
+        
+        // 如果缓冲区为空，重置指针到起始位置以保持连续性
+        if (size_ == 0) {
+            head_ = tail_ = 0;
+        }
+    }
+
+    // 更新 tail 指针（当外部直接写入了数据后调用）
+    void updateTail(size_t bytes_added) {
+        if (bytes_added > available()) {
+            throw std::invalid_argument("Added bytes exceed available space");
+        }
+        
+        //更新tail之前，
+        size_t this_seg_len = ;
+
+
+        tail_ = (tail_ + bytes_added) % capacity_;
+        size_ += bytes_added;
+        
+        true_data_size_ += bytes_added;
+    }
+
+    // 直接设置 head 和 tail 指针（高级用法，谨慎使用）
+    void setPointers(size_t new_head, size_t new_tail, size_t new_size) {
+        if (new_head >= capacity_ || new_tail >= capacity_) {
+            throw std::invalid_argument("Head or tail position exceeds capacity");
+        }
+        
+        if (new_size > capacity_) {
+            throw std::invalid_argument("Size exceeds capacity");
+        }
+        
+        head_ = new_head;
+        tail_ = new_tail;
+        size_ = new_size;
+    }
+
+    // 根据外部操作的数据量更新指针（更安全的接口）
+    void syncPointers(size_t bytes_consumed, size_t bytes_produced) {
+        if (bytes_consumed > size_) {
+            throw std::invalid_argument("Consumed bytes exceed current size");
+        }
+        
+        if (bytes_produced > available()) {
+            throw std::invalid_argument("Produced bytes exceed available space");
+        }
+        
+        // 更新消费的数据
+        head_ = (head_ + bytes_consumed) % capacity_;
+        size_ -= bytes_consumed;
+        
+        // 更新生产的数据
+        tail_ = (tail_ + bytes_produced) % capacity_;
+        size_ += bytes_produced;
+        
+        // 如果缓冲区为空，重置指针
+        if (size_ == 0) {
+            head_ = tail_ = 0;
+        }
+    }
+
+    // 验证指针状态的辅助方法
+    bool validatePointers() const {
+        // 检查指针是否在有效范围内
+        if (head_ >= capacity_ || tail_ >= capacity_) {
+            return false;
+        }
+        
+        // 检查大小是否与指针位置一致
+        size_t calculated_size;
+        if (tail_ >= head_) {
+            calculated_size = tail_ - head_;
+        } else {
+            calculated_size = capacity_ - head_ + tail_;
+        }
+        
+        return calculated_size == size_;
+    }
+
+    // 强制修复指针状态（在极端情况下使用）
+    void repairPointers() {
+        if (head_ >= capacity_) head_ %= capacity_;
+        if (tail_ >= capacity_) tail_ %= capacity_;
+        
+        // 重新计算实际大小
+        if (tail_ >= head_) {
+            size_ = tail_ - head_;
+        } else {
+            size_ = capacity_ - head_ + tail_;
+        }
+        
+        // 确保大小不超过容量
+        if (size_ > capacity_) {
+            size_ = capacity_;
+        }
+    }
 
     // 打印状态（调试用）
     void printStats() const {
@@ -429,10 +584,6 @@ public:
 	SoR_connection();
 	~SoR_connection();	
 
-	int post_send(__const void *__buf, size_t __nbytes);
-	int poll_completion();
-	int post_receive();
-
 	int connect_to_peer();
 	int sock_sync_data(int xfer_size, char *local_data, char *remote_data);
 	int create_rdma_resources();
@@ -442,6 +593,11 @@ public:
 	int modify_qp_to_rts();
 	int create_ringbuffer(size_t capacity);
 	
+    int post_send(__const void *__buf, size_t __nbytes);
+	int post_receive();
+
+    int poll_send_completion();  // 专门轮询发送完成
+    int poll_recv_completion();  // 专门轮询接收完成
 
 
 };
@@ -474,6 +630,77 @@ private:
 
 
 
+// 最简单的RDMA操作数据结构
+struct rdma_op_data {
+    void*   data_addr;
+    size_t  data_size;
+    int     op_type;  // 0=发送, 1=接收
+};
+
+// 最简单的内存池
+class simple_rdma_pool {
+private:
+    std::vector<rdma_op_data*> free_list_;
+    std::vector<rdma_op_data*> all_objects_;
+    std::mutex mtx_;
+    
+public:
+    simple_rdma_pool(size_t initial_size = 1000) {
+        // 预分配对象
+        for (size_t i = 0; i < initial_size; ++i) {
+            rdma_op_data* obj = new rdma_op_data();
+            free_list_.push_back(obj);
+            all_objects_.push_back(obj);
+        }
+    }
+    
+    ~simple_rdma_pool() {
+        // 清理所有对象
+        for (auto obj : all_objects_) {
+            delete obj;
+        }
+        free_list_.clear();
+        all_objects_.clear();
+    }
+    
+    // 获取一个对象
+    rdma_op_data* allocate(void* addr = nullptr, size_t size = 0, int type = 0) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        
+        if (free_list_.empty()) {
+            // 池为空时动态扩展
+            rdma_op_data* obj = new rdma_op_data();
+            all_objects_.push_back(obj);
+            obj->data_addr = addr;
+            obj->data_size = size;
+            obj->op_type = type;
+            return obj;
+        }
+        
+        rdma_op_data* obj = free_list_.back();
+        free_list_.pop_back();
+        obj->data_addr = addr;
+        obj->data_size = size;
+        obj->op_type = type;
+        return obj;
+    }
+    
+    // 释放对象（返回池中）
+    void deallocate(rdma_op_data* obj) {
+        if (!obj) return;
+        
+        std::lock_guard<std::mutex> lock(mtx_);
+        obj->data_addr = nullptr;
+        obj->data_size = 0;
+        free_list_.push_back(obj);
+    }
+};
+
+// 全局内存池实例
+extern simple_rdma_pool* g_rdma_pool;
+
+
+
 // zc add
 extern SoRconn_collection* g_p_conn_collection;
 
@@ -483,5 +710,10 @@ inline SoR_connection* sorconn_collection_get_conn(int fd)
 		return g_p_conn_collection->find_sorconn(fd);
 	return NULL;
 }
+
+
+
+
+
 
 #endif /* RING_H */

@@ -469,6 +469,7 @@ mem_buf_desc_t* cq_mgr::process_cq_element_rx(vma_ibv_wc* p_wce)
 
 	// Get related mem_buf_desc pointer from the wr_id
 	mem_buf_desc_t* p_mem_buf_desc = (mem_buf_desc_t*)(uintptr_t)p_wce->wr_id;
+	//由于wr_id是uint64_t类型，而指针在64位系统中也是64位，因此可以直接将指针转换为uint64_t存储。这里使用(uintptr_t)进行转换是为了确保在将指针转换为整数时不会丢失精度。
 
 	bool bad_wce = p_wce->status != IBV_WC_SUCCESS;
 

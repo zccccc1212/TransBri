@@ -3145,19 +3145,67 @@ ssize_t Sockfd_tcp::write( __const void *__buf, size_t __nbytes){
 	}
 	return __nbytes;
 }
+
 ssize_t Sockfd_tcp::read(void *__buf, size_t __nbytes){
 	//在poll之前和之后加打印时间的语句，看看时间消耗在哪里了
-	
+	size_t total_read = 0;
+	size_t need_to_read = __nbytes;
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
 	if(p_sor_conn == nullptr){
 		return orig_os_api.read(m_fd, __buf, __nbytes);
 	}
+    
+	size_t recved_sz = p_sor_conn->m_recv_rb->true_data_size();
 
-	int ret = p_sor_conn->poll_completion();
-	if(ret == 3){
-		memcpy(__buf, p_sor_conn->my_res.recv_buf, __nbytes);
+	if(recved_sz >= __nbytes){
+process_recv_data:
+		size_t data_length;
+		while(total_read < __nbytes){
+			p_sor_conn->m_recv_rb->read(&data_length, 4 ,0); //读取象征这个recv窗口类的长度的4个字节
+			if(data_length > need_to_read){
+				p_sor_conn->m_recv_rb->read(__buf, need_to_read, 1);
+				total_read += need_to_read;
+				//更新这一块recv段窗口数据的大小
+				data_length -= need_to_read;
+				p_sor_conn->m_recv_rb->writeBeforeHead(&data_length);
+				p_sor_conn->post_receive();
+				return total_read;
+			}
+			p_sor_conn->m_recv_rb->read(__buf, data_length, 0);
+			total_read += data_length;
+			need_to_read -= data_length;
+			p_sor_conn->m_recv_rb->updateHead(RECV_SIZE-data_length);
+			p_sor_conn->post_receive();
+		}
+	} 
+	else{
+		int return_sz = p_sor_conn->poll_recv_completion();
+		recved_sz = p_sor_conn->m_recv_rb->true_data_size();
+		if(recved_sz >= __nbytes){
+			goto process_recv_data;
+		}
+		else{
+			//有多少读多少然后直接返回
+			size_t data_length;
+			while(total_read < recved_sz){
+				p_sor_conn->m_recv_rb->read(&data_length, 4, 0); //读取象征这个recv窗口段的长度的4个字节
+				if(data_length > need_to_read){
+					p_sor_conn->m_recv_rb->read(__buf, need_to_read, 1);
+					total_read += need_to_read;
+					//更新这一块recv窗口数据的大小
+					data_length -= need_to_read;
+					p_sor_conn->m_recv_rb->writeBeforeHead(&data_length);
+					p_sor_conn->post_receive();
+					return total_read;
+				}
+			p_sor_conn->m_recv_rb->read(__buf, data_length, 1);
+			total_read += data_length;
+			need_to_read -= data_length;
+			p_sor_conn->m_recv_rb->updateHead(RECV_SIZE-data_length);
+			p_sor_conn->post_receive();
+			}
+		}
 	}
-	p_sor_conn->post_receive();
 	return __nbytes;
 }
 
