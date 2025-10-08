@@ -77,6 +77,10 @@ SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/, int gi
 	m_gidindex = gidindex;// 144 : 4  ; 155 : 2;
     m_send_rb = nullptr;
     m_recv_rb = nullptr;
+
+    cur_send_wr_id = 0;
+    cur_recv_wr_id = 0;
+
 	find_gid();
 	resources_init();
 	int rc = create_rdma_resources();
@@ -304,7 +308,7 @@ int SoR_connection::connect_to_reer(){
 
 
 	//prepare local rdma data to trans 
-	local_con_data.addr = htonll((uintptr_t)m_res.recv_buf);
+	local_con_data.addr = htonll((uintptr_t)m_recv_rb->getBufferPtr());
     local_con_data.rkey = htonl(m_res.recv_mr->rkey);
     local_con_data.qp_num = htonl(m_res.qp->qp_num);
     local_con_data.lid = htons(m_res.port_attr.lid);
@@ -491,14 +495,14 @@ int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
     
 
     // 先写入4字节的数据长度
-    size_t length_size = m_send_rb->write(&data_length, sizeof(uint32_t));
+    size_t length_size = m_send_rb->write(&data_length, sizeof(uint32_t), 0);
     if(length_size < sizeof(uint32_t)) {
         fprintf(stderr, "failed to write data length\n");
         return -1;
     }
 
     // 再写入实际数据
-    size_t data_size = m_send_rb->write(__buf, __nbytes);
+    size_t data_size = m_send_rb->write(__buf, __nbytes, 1);
     if(data_size < __nbytes) {
         fprintf(stderr, "failed to write data, expected %zu, actual %zu\n", __nbytes, data_size);
         return -1;
@@ -506,17 +510,20 @@ int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
 
 
     sge.addr = (uintptr_t)m_send_rb->getDataPtr();
-    sge.length = __nbytes;
+    sge.length = __nbytes+4; //要记得加报文头也就是这个传输的长度的4字节
     sge.lkey = m_res.send_mr->lkey;
 
 
     // 从内存池获取跟踪对象
-    rdma_op_data* tracker = g_rdma_pool.allocate(sge.addr, sge.length, 0);  // 0=发送
+    //rdma_op_data* tracker = g_rdma_pool.allocate(sge.addr, sge.length, 0);  // 0=发送
 
     /* prepare the send work request */
     memset(&sr, 0, sizeof(sr));
     sr.next = NULL;
-    sr.wr_id = (uint64_t)tracker;//将wr_id设置为rdma_op_data对应的结构的地址，直接方便查询
+    sr.wr_id = (uint64_t)cur_send_wr_id;//将wr_id设置为rdma_op_data对应的结构的地址，直接方便查询
+    
+    cur_send_wr_id++;
+
     sr.sg_list = &sge;
     sr.num_sge = 1;
     sr.opcode = IBV_WR_SEND;
@@ -549,12 +556,15 @@ int SoR_connection::post_receive(){
     sge.lkey = m_res.recv_mr->lkey;
 
     // 从内存池获取跟踪对象
-    rdma_op_data* tracker = g_rdma_pool.allocate(sge.addr, sge.length, 1);  // 1=接收
+    //rdma_op_data* tracker = g_rdma_pool.allocate(sge.addr, sge.length, 1);  // 1=接收
 
     /* prepare the receive work request */
     memset(&rr, 0, sizeof(rr));
     rr.next = NULL;
-    rr.wr_id = (uint64_t)tracker;//将wr_id设置为rdma_op_data对应的结构的地址，直接方便查询
+    rr.wr_id = (uint64_t)cur_recv_wr_id;//将wr_id设置为rdma_op_data对应的结构的地址，直接方便查询
+    
+    cur_recv_wr_id++;
+
     rr.sg_list = &sge;
     rr.num_sge = 1;
 
@@ -573,7 +583,7 @@ int SoR_connection::post_receive(){
 
 
 //现阶段还是需要分两个cq，一个专门的发送cq，一个专门的接收cq
-int SoR_connection::poll_send_completion() {
+size_t SoR_connection::poll_send_completion() {
     struct ibv_wc wc;
     unsigned long start_time_msec;
     unsigned long cur_time_msec;
@@ -602,7 +612,7 @@ int SoR_connection::poll_send_completion() {
             fprintf(stderr, "send failed with status: 0x%x\n", wc.status);
             return -3;
         }
-        
+        /*
         // 通过wr_id获取跟踪信息
         rdma_op_data* tracker = (rdma_op_data*)wc.wr_id;
         if (!tracker) {
@@ -618,7 +628,7 @@ int SoR_connection::poll_send_completion() {
                data_addr, data_size);
         
         // 清理资源
-        g_rdma_pool.deallocate(tracker);
+        g_rdma_pool.deallocate(tracker);*/
         
         // 更新发送窗口等统计信息
         m_send_rb->updateHead(wc.byte_len);
@@ -626,7 +636,7 @@ int SoR_connection::poll_send_completion() {
 
         send_buffer_current -= wc.byte_len;
         
-        return 0;  // 成功
+        return byte_len;  // 成功
     }
 }
 
@@ -661,6 +671,8 @@ int SoR_connection::poll_recv_completion() {
             return -3;
         }
         
+
+        /*
         // 通过wr_id获取跟踪信息
         rdma_op_data* tracker = (rdma_op_data*)wc.wr_id;
         if (!tracker) {
@@ -671,10 +683,14 @@ int SoR_connection::poll_recv_completion() {
         printf("Receive completed - Data addr: %p, Actual size: %d\n", 
                tracker->data_addr, wc.byte_len);
         
-        g_rdma_pool.deallocate(tracker);
+        g_rdma_pool.deallocate(tracker);*/
         
-        m_recv_rb->updateTail(wc.byte_len);
+        m_recv_rb->updateTail(wc.byte_len);//更新tail指针和size
         
+        //读取这一个段的长度并更新实际长度
+        size_t this_seg_len ;
+        m_recv_rb->peek(&this_seg_len, 4);
+        m_recv_rb->add_true_data_size(this_seg_len);
 
         // 立即重新投递一个新的接收请求，保持接收队列饱满
         post_receive();

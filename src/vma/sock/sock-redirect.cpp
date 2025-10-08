@@ -3132,24 +3132,42 @@ ssize_t Sockfd_tcp::write( __const void *__buf, size_t __nbytes){
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
 
 	if(p_sor_conn){
-		p_sor_conn->post_send(__buf, __nbytes);
+		size_t total_send = 0;
+		size_t available = p_sor_conn->m_send_rb->available();
+
+		if(available >= __nbytes){
+			p_sor_conn->post_send(__buf, __nbytes);
+			total_send += __nbytes;
+		}
+		else{
+			p_sor_conn->poll_send_completion();
+			available = p_sor_conn->m_send_rb->available();
+			if(available >= __nbytes){
+				p_sor_conn->post_send(__buf, __nbytes);
+				total_send += __nbytes;
+			}
+			else{
+				p_sor_conn->post_send(__buf, available);
+				total_send += available;
+			}
+		}
 	}
 	else{
 		return orig_os_api.write(m_fd, __buf, __nbytes);
 	}
 
-	int ret = p_sor_conn->poll_completion();
+	size_t return_sz = p_sor_conn->poll_send_completion();
 
-	if(ret == 4){
-		printf("rdma send success\n");
-	}
-	return __nbytes;
+	
+	
+
+	return return_sz;
 }
 
 ssize_t Sockfd_tcp::read(void *__buf, size_t __nbytes){
 	//在poll之前和之后加打印时间的语句，看看时间消耗在哪里了
 	size_t total_read = 0;
-	size_t need_to_read = __nbytes;
+	size_t need_to_read;
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
 	if(p_sor_conn == nullptr){
 		return orig_os_api.read(m_fd, __buf, __nbytes);
@@ -3159,6 +3177,7 @@ ssize_t Sockfd_tcp::read(void *__buf, size_t __nbytes){
 
 	if(recved_sz >= __nbytes){
 process_recv_data:
+		need_to_read = __nbytes;
 		size_t data_length;
 		while(total_read < __nbytes){
 			p_sor_conn->m_recv_rb->read(&data_length, 4 ,0); //读取象征这个recv窗口类的长度的4个字节
@@ -3171,7 +3190,7 @@ process_recv_data:
 				p_sor_conn->post_receive();
 				return total_read;
 			}
-			p_sor_conn->m_recv_rb->read(__buf, data_length, 0);
+			p_sor_conn->m_recv_rb->read(__buf, data_length, 1);
 			total_read += data_length;
 			need_to_read -= data_length;
 			p_sor_conn->m_recv_rb->updateHead(RECV_SIZE-data_length);
@@ -3179,12 +3198,13 @@ process_recv_data:
 		}
 	} 
 	else{
-		int return_sz = p_sor_conn->poll_recv_completion();
+		p_sor_conn->poll_recv_completion();
 		recved_sz = p_sor_conn->m_recv_rb->true_data_size();
 		if(recved_sz >= __nbytes){
 			goto process_recv_data;
 		}
 		else{
+			need_to_read = recved_sz;
 			//有多少读多少然后直接返回
 			size_t data_length;
 			while(total_read < recved_sz){
@@ -3198,11 +3218,11 @@ process_recv_data:
 					p_sor_conn->post_receive();
 					return total_read;
 				}
-			p_sor_conn->m_recv_rb->read(__buf, data_length, 1);
-			total_read += data_length;
-			need_to_read -= data_length;
-			p_sor_conn->m_recv_rb->updateHead(RECV_SIZE-data_length);
-			p_sor_conn->post_receive();
+				p_sor_conn->m_recv_rb->read(__buf, data_length, 1);
+				total_read += data_length;
+				need_to_read -= data_length;
+				p_sor_conn->m_recv_rb->updateHead(RECV_SIZE-data_length);
+				p_sor_conn->post_receive();
 			}
 		}
 	}
@@ -3215,23 +3235,34 @@ ssize_t Sockfd_tcp::send(__const void *__buf, size_t __nbytes, int __flags){
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
 
 	if(p_sor_conn){
-		p_sor_conn->post_send(__buf, __nbytes);
+		size_t total_send = 0;
+		size_t available = p_sor_conn->m_send_rb->available();
+
+		if(available >= __nbytes){
+			p_sor_conn->post_send(__buf, __nbytes);
+			total_send += __nbytes;
+		}
+		else{
+			p_sor_conn->poll_send_completion();
+			available = p_sor_conn->m_send_rb->available();
+			if(available >= __nbytes){
+				p_sor_conn->post_send(__buf, __nbytes);
+				total_send += __nbytes;
+			}
+			else{
+				p_sor_conn->post_send(__buf, available);
+				total_send += available;
+			}
+		}
 	}
 	else{
-		return orig_os_api.write(m_fd, __buf, __nbytes);
+		return orig_os_api.send(m_fd, __buf, __nbytes, __flags);
 	}
 
-	int ret = p_sor_conn->poll_completion();
+	size_t return_sz = p_sor_conn->poll_send_completion();
 
-	if(ret == 4){
-		printf("rdma send success\n");
-	}
-	
-	if(__flags){
 
-	}
-
-	return __nbytes;
+	return return_sz;
 }
 
 

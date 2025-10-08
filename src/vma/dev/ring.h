@@ -222,6 +222,9 @@ public:
     // 获取真正存储的数据量
     size_t true_data_size() const { return true_data_size_; }
 
+    void add_true_data_size(size_t adddata) {true_data_size_ += adddata; }
+
+
     // 获取剩余空间
     size_t available() const { return capacity_ - size_; }
     
@@ -467,10 +470,6 @@ public:
         if (bytes_added > available()) {
             throw std::invalid_argument("Added bytes exceed available space");
         }
-        
-        //更新tail之前，
-        size_t this_seg_len = ;
-
 
         tail_ = (tail_ + bytes_added) % capacity_;
         size_ += bytes_added;
@@ -565,6 +564,9 @@ class SoR_connection{
 private:
 	int m_fd;	
 
+    uint64_t cur_send_wr_id;
+    uint64_t cur_recv_wr_id;
+
 	struct resources m_res;
 	int m_qpn;
 	int m_recv_cqn;
@@ -596,7 +598,7 @@ public:
     int post_send(__const void *__buf, size_t __nbytes);
 	int post_receive();
 
-    int poll_send_completion();  // 专门轮询发送完成
+    size_t poll_send_completion();  // 专门轮询发送完成
     int poll_recv_completion();  // 专门轮询接收完成
 
 
@@ -697,7 +699,7 @@ public:
 };
 
 // 全局内存池实例
-extern simple_rdma_pool* g_rdma_pool;
+//extern simple_rdma_pool* g_rdma_pool;
 
 
 
