@@ -3054,7 +3054,7 @@ Sockfd_tcp::Sockfd_tcp(int fd)
     : m_fd(fd),send_buffer_current(0),recv_buffer_current(0)
 {
     // 使用值初始化确保所有成员处于安全状态
-	resources_init();
+	//resources_init();
     
 }
 
