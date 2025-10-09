@@ -94,6 +94,10 @@ sighandler_t g_sighandler = NULL;
 class ring_simple;
 class ring_eth_direct;
 
+
+#define RECV_SIZE   1048576
+
+
 template<typename T>
 void assign_dlsym(T &ptr, const char *name) {
 	ptr = reinterpret_cast<T>(dlsym(RTLD_NEXT, name));
@@ -3074,13 +3078,13 @@ int Sockfd_tcp::accept(){
 
 	
 	if(g_p_conn_collection){
-		g_p_conn_collection->add_sorconn(fd);
+		g_p_conn_collection->add_sorconn(m_fd);
 	}
 	
 	m_sorconn_key = m_fd;
 
 
-	SoR_connection* p_sor_conn = sorconn_collection_get_conn(fd);
+	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
 	p_sor_conn->connect_to_peer();
 
 	p_sor_conn->post_receive();
@@ -3226,7 +3230,7 @@ process_recv_data:
 			}
 		}
 	}
-	return __nbytes;
+	return total_read;
 }
 
 
@@ -3274,4 +3278,3 @@ extern SoRconn_collection* g_p_conn_collection;
 
 
 
-extern ;

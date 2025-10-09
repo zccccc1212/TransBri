@@ -206,7 +206,7 @@ public:
             throw std::invalid_argument("Capacity must be greater than 0");
         }
         buffer_.resize(capacity);
-        memset(buffer_, 0 , capacity_)
+        //memset(buffer_, 0 , capacity_)
     }
 
     ~RingBuffer() = default;
@@ -295,11 +295,11 @@ public:
         size_t to_write = std::min(len, contiguous);
         
         // 写入第一部分
-        std::memcpy(&buffer_[tail_], src, to_write);
+        memcpy(&buffer_[tail_], src, to_write);
         
         // 如果需要回绕写入剩余部分
         if (to_write < len) {
-            std::memcpy(&buffer_[0], src + to_write, len - to_write);
+            memcpy(&buffer_[0], src + to_write, len - to_write);
         }
         
         if(flag){
@@ -324,11 +324,11 @@ public:
         size_t to_read = std::min(len, contiguous);
         
         // 读取第一部分
-        std::memcpy(dst, &buffer_[head_], to_read);
+        memcpy(dst, &buffer_[head_], to_read);
         
         // 如果需要回绕读取剩余部分
         if (to_read < len) {
-            std::memcpy(dst + to_read, &buffer_[0], len - to_read);
+            memcpy(dst + to_read, &buffer_[0], len - to_read);
         }
         
         return len;
@@ -381,12 +381,12 @@ public:
         // 写入4个字节到new_head位置
         if (new_head + 4 <= capacity_) {
             // 不需要回绕，连续写入
-            std::memcpy(&buffer_[new_head], src, 4);
+            memcpy(&buffer_[new_head], src, 4);
         } else {
             // 需要回绕写入
             size_t first_part = capacity_ - new_head;
-            std::memcpy(&buffer_[new_head], src, first_part);
-            std::memcpy(&buffer_[0], src + first_part, 4 - first_part);
+            memcpy(&buffer_[new_head], src, first_part);
+            memcpy(&buffer_[0], src + first_part, 4 - first_part);
         }
 
         // 更新head指针和缓冲区大小
@@ -474,7 +474,7 @@ public:
         tail_ = (tail_ + bytes_added) % capacity_;
         size_ += bytes_added;
         
-        true_data_size_ += bytes_added;
+        
     }
 
     // 直接设置 head 和 tail 指针（高级用法，谨慎使用）
@@ -580,11 +580,17 @@ private:
 	union ibv_gid my_gid;
 	int m_gidindex;
 
-	RingBuffer * m_send_rb;
-	RingBuffer * m_recv_rb;
+
 public:
-	SoR_connection();
+
+    RingBuffer * m_send_rb;
+	RingBuffer * m_recv_rb;
+
+	SoR_connection(int fd);
 	~SoR_connection();	
+
+    void resources_init();
+    int find_gid();
 
 	int connect_to_peer();
 	int sock_sync_data(int xfer_size, char *local_data, char *remote_data);
@@ -613,7 +619,7 @@ public:
     int add_sorconn(int fd);
     
     // 根据fd查找对应的sor conn
-    Sockfd_tcp* find_sorconn(int fd);
+    SoR_connection* find_sorconn(int fd);
     
     // 从集合中移除并关闭对应的sor conn
     int  remove_sorconn(int fd);

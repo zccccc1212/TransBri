@@ -49,8 +49,8 @@
 
 #define RECV_SIZE	1048576  //rdma recv 操作的大小，可能设置成MTU好一点
 
-#define RECV_WINDOW_SIZE    4096
-#define CQ_SIZE     1000    //cqe size
+#define RECV_WINDOW_SIZE    4095
+#define CQE_SIZE     4095    //cqe size
 
 
 ring::ring() :
@@ -74,9 +74,9 @@ void ring::print_val()
 
 
 // zc add
-SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/, int gidindex){
+SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/){
 	m_fd = fd;
-	m_gidindex = gidindex;// 144 : 4  ; 155 : 2;
+	m_gidindex = 4;// 144 : 4  ; 155 : 2;
     m_send_rb = nullptr;
     m_recv_rb = nullptr;
 
@@ -110,10 +110,10 @@ int SoR_connection::create_rdma_resources(){
 	struct ibv_device **dev_list = NULL;
     struct ibv_qp_init_attr qp_init_attr;
     struct ibv_device *ib_dev = NULL;
-    size_t size;
+    //size_t size;
     //int i;
     int mr_flags = 0;
-    int cq_size = 0;
+    //int cq_size = 0;
     int num_devices;
     int rc = 0;
 
@@ -171,14 +171,14 @@ int SoR_connection::create_rdma_resources(){
     }
     
     // 创建发送CQ
-    m_res.send_cq = ibv_create_cq(m_res.ib_ctx, CQ_SIZE, NULL, NULL, 0);
+    m_res.send_cq = ibv_create_cq(m_res.ib_ctx, CQE_SIZE, NULL, NULL, 0);
     if (!m_res.send_cq) {
         fprintf(stderr, "Failed to create send CQ\n");
         return -1;
     }
     
     // 创建接收CQ  
-    m_res.recv_cq = ibv_create_cq(m_res.ib_ctx, CQ_SIZE, NULL, NULL, 0);
+    m_res.recv_cq = ibv_create_cq(m_res.ib_ctx, CQE_SIZE, NULL, NULL, 0);
     if (!m_res.recv_cq) {
         fprintf(stderr, "Failed to create recv CQ\n");
         return -1;
@@ -186,10 +186,9 @@ int SoR_connection::create_rdma_resources(){
 
 
     //create ringbuffer and mr and rigister mr
-    int ret = create_ringbuffer(MR_SIZE);
-    if(ret){
-
-    }
+    create_ringbuffer(MR_SIZE);
+    
+    
     mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE ;
 
     m_res.send_mr = ibv_reg_mr(m_res.pd, m_send_rb->getBufferPtr(), MR_SIZE, mr_flags);
@@ -200,17 +199,17 @@ int SoR_connection::create_rdma_resources(){
         goto resources_create_exit;
     }
 	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-            m_res.send_buf, m_res.send_mr->lkey, m_res.send_mr->rkey, mr_flags);
+            m_send_rb->getBufferPtr(), m_res.send_mr->lkey, m_res.send_mr->rkey, mr_flags);
 
     m_res.recv_mr = ibv_reg_mr(m_res.pd, m_recv_rb->getBufferPtr(), MR_SIZE, mr_flags);
-    if(!m_res.recv_buf)
+    if(!m_res.recv_mr)
     {
         fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
         rc = 1;
         goto resources_create_exit;
     }
 	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-            m_res.recv_buf, m_res.recv_mr->lkey, m_res.recv_mr->rkey, mr_flags);
+            m_recv_rb->getBufferPtr(), m_res.recv_mr->lkey, m_res.recv_mr->rkey, mr_flags);
 
 	/* create the Queue Pair */
 	memset(&qp_init_attr, 0, sizeof(qp_init_attr));
@@ -251,20 +250,15 @@ resources_create_exit:
             ibv_dereg_mr(m_res.send_mr);
             m_res.send_mr = NULL;
         }
-        if(m_res.recv_buf)
+        if(m_res.send_cq)
         {
-            free(m_res.recv_buf);
-            m_res.recv_buf = NULL;
+            ibv_destroy_cq(m_res.send_cq);
+            m_res.send_cq = NULL;
         }
-		if(m_res.send_buf)
+        if(m_res.recv_cq)
         {
-            free(m_res.send_buf);
-            m_res.send_buf = NULL;
-        }
-        if(m_res.cq)
-        {
-            ibv_destroy_cq(m_res.cq);
-            m_res.cq = NULL;
+            ibv_destroy_cq(m_res.recv_cq);
+            m_res.recv_cq = NULL;
         }
         if(m_res.pd)
         {
@@ -297,17 +291,17 @@ int SoR_connection::find_gid(){
 	int rc = ibv_query_gid(m_res.ib_ctx, 1, m_gidindex, &my_gid);// 144
 	if(rc)
     {
-        fprintf(stderr, "could not get gid for port 1 index %d\n", gidindex);
+        fprintf(stderr, "could not get gid for port 1 index %d\n", m_gidindex);
     }
 	return rc;
 }
 
-int SoR_connection::connect_to_reer(){
+int SoR_connection::connect_to_peer(){
 
 	struct cm_con_data_t local_con_data;
     struct cm_con_data_t remote_con_data;
     struct cm_con_data_t tmp_con_data;
-
+    int rc;
 
 	//prepare local rdma data to trans 
 	local_con_data.addr = htonll((uintptr_t)m_recv_rb->getBufferPtr());
@@ -340,7 +334,7 @@ int SoR_connection::connect_to_reer(){
     fprintf(stdout, " Remote QP number = 0x%x\n", remote_con_data.qp_num);
     fprintf(stdout, " Remote LID = 0x%x\n", remote_con_data.lid);
 
-	int rc = modify_qp();
+	rc = modify_qp();
 	if(rc){
 
 	}
@@ -349,7 +343,7 @@ int SoR_connection::connect_to_reer(){
         post_receive();
     }
 
-
+connect_qp_exit:
 	return rc;
 }
 
@@ -599,7 +593,7 @@ size_t SoR_connection::poll_send_completion() {
     unsigned long cur_time_msec;
     struct timeval cur_time;
     int poll_result;
-    int rc = 0;
+    //int rc = 0;
     
     gettimeofday(&cur_time, NULL);
     start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
@@ -646,7 +640,7 @@ size_t SoR_connection::poll_send_completion() {
 
         send_buffer_current -= wc.byte_len;
         
-        return byte_len-4;  // 成功
+        return wc.byte_len-4;  // 成功
     }
 }
 
@@ -657,7 +651,7 @@ int SoR_connection::poll_recv_completion() {
     unsigned long cur_time_msec;
     struct timeval cur_time;
     int poll_result;
-    int rc = 0;
+    //int rc = 0;
     
     gettimeofday(&cur_time, NULL);
     start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
@@ -695,7 +689,8 @@ int SoR_connection::poll_recv_completion() {
         
         g_rdma_pool.deallocate(tracker);*/
         
-        m_recv_rb->updateTail(wc.byte_len);//更新tail指针和size
+       //m_recv_rb->updateTail(wc.byte_len);//更新tail指针和size
+
         
         //读取这一个段的长度并更新实际长度
         size_t this_seg_len ;
@@ -718,7 +713,7 @@ int SoR_connection::create_ringbuffer(size_t capacity){
     RingBuffer * recvbuf = new RingBuffer(capacity);
     m_send_rb = sendbuf;
     m_recv_rb = recvbuf;
-
+    return 0;
 
 }
 

@@ -325,7 +325,7 @@ extern My_fd_collection* my_g_p_fd_collection;
 inline Sockfd_tcp* my_fd_collection_get_sockfd(int fd)
 {
 	if (my_g_p_fd_collection) 
-		return my_fd_collection->find_socketfd(fd);
+		return my_g_p_fd_collection->find_socketfd(fd);
 	return NULL;
 }
 
