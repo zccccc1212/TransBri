@@ -45,9 +45,11 @@
 #define MAX_POLL_CQ_TIMEOUT 2000
 
 #define MSG_SIZE 64
-#define MR_SIZE 4294967295
+#define MR_SIZE 4294967296
 
 #define RECV_SIZE	1048576  //rdma recv 操作的大小，可能设置成MTU好一点
+
+#define RECV_WINDOW_SIZE    4096
 #define CQ_SIZE     1000    //cqe size
 
 
@@ -216,8 +218,8 @@ int SoR_connection::create_rdma_resources(){
     qp_init_attr.sq_sig_all = 1;
     qp_init_attr.send_cq = m_res.send_cq;
     qp_init_attr.recv_cq = m_res.recv_cq;
-    qp_init_attr.cap.max_send_wr = 1000;//TODO : set the approperiate wr number
-    qp_init_attr.cap.max_recv_wr = 1000;
+    qp_init_attr.cap.max_send_wr = RECV_WINDOW_SIZE;//TODO : set the approperiate wr number
+    qp_init_attr.cap.max_recv_wr = RECV_WINDOW_SIZE;
     qp_init_attr.cap.max_send_sge = 1;
     qp_init_attr.cap.max_recv_sge = 1;
     m_res.qp = ibv_create_qp(m_res.pd, &qp_init_attr);
@@ -342,6 +344,11 @@ int SoR_connection::connect_to_reer(){
 	if(rc){
 
 	}
+
+    for(int j = 0; j < RECV_WINDOW_SIZE;++j){
+        post_receive();
+    }
+
 
 	return rc;
 }
@@ -555,6 +562,9 @@ int SoR_connection::post_receive(){
     sge.length = RECV_SIZE;
     sge.lkey = m_res.recv_mr->lkey;
 
+    m_recv_rb->updateTail(RECV_SIZE);
+
+
     // 从内存池获取跟踪对象
     //rdma_op_data* tracker = g_rdma_pool.allocate(sge.addr, sge.length, 1);  // 1=接收
 
@@ -636,7 +646,7 @@ size_t SoR_connection::poll_send_completion() {
 
         send_buffer_current -= wc.byte_len;
         
-        return byte_len;  // 成功
+        return byte_len-4;  // 成功
     }
 }
 
@@ -698,7 +708,7 @@ int SoR_connection::poll_recv_completion() {
         // 更新接收窗口等统计信息
         recv_buffer_current -= wc.byte_len;
         
-        return wc.byte_len;  // 返回接收到的数据长度
+        return 1;  // 返回接收到的数据长度
     }
 }
 

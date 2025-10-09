@@ -3194,7 +3194,7 @@ process_recv_data:
 			total_read += data_length;
 			need_to_read -= data_length;
 			p_sor_conn->m_recv_rb->updateHead(RECV_SIZE-data_length);
-			p_sor_conn->post_receive();
+			//p_sor_conn->post_receive();
 		}
 	} 
 	else{
