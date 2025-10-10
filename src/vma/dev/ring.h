@@ -406,7 +406,7 @@ public:
     }
 
     // 获取连续可写空间的指针
-    unsigned char* getContiguousWriteBlock() {
+    unsigned char*  getContiguousWriteBlock() {
         if (full()) {
             return nullptr;
         }
@@ -705,7 +705,7 @@ public:
 };
 
 // 全局内存池实例
-//extern simple_rdma_pool* g_rdma_pool;
+extern simple_rdma_pool* g_rdma_pool;
 
 
 

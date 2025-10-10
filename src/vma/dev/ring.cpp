@@ -53,6 +53,12 @@
 #define CQE_SIZE     4095    //cqe size
 
 
+
+simple_rdma_pool* g_rdma_pool = NULL;
+
+SoRconn_collection* g_p_conn_collection = NULL;
+
+
 ring::ring() :
 	m_p_n_rx_channel_fds(NULL), m_parent(NULL)
 {
@@ -83,9 +89,10 @@ SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/){
     cur_send_wr_id = 0;
     cur_recv_wr_id = 0;
 
-	find_gid();
+	
 	resources_init();
 	int rc = create_rdma_resources();
+    find_gid();
 	if(rc == 1) // create rdma res success
 	{
 
@@ -137,7 +144,8 @@ int SoR_connection::create_rdma_resources(){
 	
 	// 这里应该是找到正确的rdma设备，在我们的服务器现在有多张rdma网卡的情况下，这里后续需要想办法区分一下，只能用英伟达的网卡
 	// 好像不对，如果使用RC模式的话，照理来说intel的网卡也是可以的，这里需要区分吗？
-	ib_dev = dev_list[1];
+
+	ib_dev = dev_list[0];
 
 	/* get device handle */
     m_res.ib_ctx = ibv_open_device(ib_dev);
@@ -516,12 +524,12 @@ int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
 
 
     // 从内存池获取跟踪对象
-    //rdma_op_data* tracker = g_rdma_pool.allocate(sge.addr, sge.length, 0);  // 0=发送
+    rdma_op_data* tracker = g_rdma_pool.allocate(sge.addr, sge.length, 0);  // 0=发送
 
     /* prepare the send work request */
     memset(&sr, 0, sizeof(sr));
     sr.next = NULL;
-    sr.wr_id = (uint64_t)cur_send_wr_id;//将wr_id设置为rdma_op_data对应的结构的地址，直接方便查询
+    sr.wr_id = (uint64_t)tracker;//将wr_id设置为rdma_op_data对应的结构的地址，直接方便查询
     
     cur_send_wr_id++;
 
@@ -616,7 +624,7 @@ size_t SoR_connection::poll_send_completion() {
             fprintf(stderr, "send failed with status: 0x%x\n", wc.status);
             return -3;
         }
-        /*
+        
         // 通过wr_id获取跟踪信息
         rdma_op_data* tracker = (rdma_op_data*)wc.wr_id;
         if (!tracker) {
@@ -625,17 +633,17 @@ size_t SoR_connection::poll_send_completion() {
         }
         // 使用跟踪信息
         void* data_addr = tracker->data_addr;
-        size_t data_size = (tracker->op_type == 1) ? wc.byte_len : tracker->data_size;
+        size_t data_size = tracker->data_size;
 
 
         printf("Send completed - Data addr: %p, Size: %zu\n", 
                data_addr, data_size);
         
         // 清理资源
-        g_rdma_pool.deallocate(tracker);*/
+        g_rdma_pool.deallocate(tracker);
         
         // 更新发送窗口等统计信息
-        m_send_rb->updateHead(wc.byte_len);
+        m_send_rb->updateHead(data_size);
 
 
         send_buffer_current -= wc.byte_len;
@@ -695,6 +703,8 @@ int SoR_connection::poll_recv_completion() {
         //读取这一个段的长度并更新实际长度
         size_t this_seg_len ;
         m_recv_rb->peek(&this_seg_len, 4);
+
+
         m_recv_rb->add_true_data_size(this_seg_len);
 
         // 立即重新投递一个新的接收请求，保持接收队列饱满

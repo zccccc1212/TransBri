@@ -105,6 +105,7 @@ public:
 	int listen(int backlog);
 	int bind(const sockaddr *__addr, socklen_t __addrlen);
 	ssize_t send(__const void *__buf, size_t __nbytes, int __flags);
+	ssize_t recv(void *__buf, size_t __nbytes, int __flags);
 	//int send();
 
 	ssize_t write( __const void *__buf, size_t __nbytes);

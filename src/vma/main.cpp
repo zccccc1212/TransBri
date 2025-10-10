@@ -734,6 +734,7 @@ static void do_global_ctors_helper()
 	// zc add
 	NEW_CTOR(my_g_p_fd_collection, My_fd_collection());
 	NEW_CTOR(g_p_conn_collection, SoRconn_collection());
+	NEW_CTOR(g_rdma_pool, simple_rdma_pool());
 
 
 	NEW_CTOR(g_p_fd_collection, fd_collection());
