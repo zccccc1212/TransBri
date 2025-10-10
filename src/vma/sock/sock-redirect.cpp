@@ -1584,6 +1584,21 @@ ssize_t recv(int __fd, void *__buf, size_t __nbytes, int __flags)
 {
 	srdr_logfuncall_entry("fd=%d", __fd);
 
+	// zc add
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.recv) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
+	
+
+	Sockfd_tcp* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(__fd);
+	if(p_socket){
+		return p_socket->recv(__buf,  __nbytes, __flags);
+	}
+
+	return orig_os_api.recv(__fd, __buf, __nbytes, __flags);
+
+
 	socket_fd_api* p_socket_object = NULL;
 	p_socket_object = fd_collection_get_sockfd(__fd);
 	if (p_socket_object) {
@@ -3268,6 +3283,84 @@ ssize_t Sockfd_tcp::send(__const void *__buf, size_t __nbytes, int __flags){
 
 	return return_sz;
 }
+
+ssize_t Sockfd_tcp::recv(void *__buf, size_t __nbytes, int __flags){
+
+	if(__flags){
+
+	}
+
+	//在poll之前和之后加打印时间的语句，看看时间消耗在哪里了
+	size_t total_read = 0;
+	size_t need_to_read;
+	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
+	if(p_sor_conn == nullptr){
+		return orig_os_api.recv(m_fd, __buf, __nbytes, __flags);
+	}
+    
+	size_t recved_sz = p_sor_conn->m_recv_rb->true_data_size();
+
+	if(recved_sz >= __nbytes){
+process_recv_data:
+		need_to_read = __nbytes;
+		size_t data_length;
+		while(total_read < __nbytes){
+			p_sor_conn->m_recv_rb->read(&data_length, 4 ,0); //读取象征这个recv窗口类的长度的4个字节
+			if(data_length > need_to_read){
+				p_sor_conn->m_recv_rb->read(__buf, need_to_read, 1);
+				total_read += need_to_read;
+				//更新这一块recv段窗口数据的大小
+				data_length -= need_to_read;
+				p_sor_conn->m_recv_rb->writeBeforeHead(&data_length);
+				p_sor_conn->post_receive();
+				return total_read;
+			}
+			p_sor_conn->m_recv_rb->read(__buf, data_length, 1);
+			total_read += data_length;
+			need_to_read -= data_length;
+			p_sor_conn->m_recv_rb->updateHead(RECV_SIZE-data_length);
+			//p_sor_conn->post_receive();
+		}
+	} 
+	else{
+		p_sor_conn->poll_recv_completion();
+		recved_sz = p_sor_conn->m_recv_rb->true_data_size();
+		if(recved_sz >= __nbytes){
+			goto process_recv_data;
+		}
+		else{
+			need_to_read = recved_sz;
+			//有多少读多少然后直接返回
+			size_t data_length;
+			while(total_read < recved_sz){
+				p_sor_conn->m_recv_rb->read(&data_length, 4, 0); //读取象征这个recv窗口段的长度的4个字节
+				if(data_length > need_to_read){
+					p_sor_conn->m_recv_rb->read(__buf, need_to_read, 1);
+					total_read += need_to_read;
+					//更新这一块recv窗口数据的大小
+					data_length -= need_to_read;
+					p_sor_conn->m_recv_rb->writeBeforeHead(&data_length);
+					p_sor_conn->post_receive();
+					return total_read;
+				}
+				p_sor_conn->m_recv_rb->read(__buf, data_length, 1);
+				total_read += data_length;
+				need_to_read -= data_length;
+				p_sor_conn->m_recv_rb->updateHead(RECV_SIZE-data_length);
+				p_sor_conn->post_receive();
+			}
+		}
+	}
+	return total_read;
+}
+
+
+
+
+
+
+
+
 
 
 // zc add
