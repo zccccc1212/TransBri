@@ -89,7 +89,22 @@ SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/){
     cur_send_wr_id = 0;
     cur_recv_wr_id = 0;
 
+
+    send_buffer_total = MR_SIZE;
+    recv_buffer_total = MR_SIZE;
 	
+
+    // 配置线程属性
+    CQEPoller::ThreadConfig config;
+    config.cpu_core = 4;                    // 绑定到CPU核心2
+    config.realtime_scheduling = true;      // 启用实时调度（需要root权限）
+    config.thread_name = "RDMA-CQE-Poller"; // 线程名称
+    config.scheduling_priority = 90;        // 调度优先级
+
+    m_cqe_poller = new CQEPoller(this, config);
+
+    
+
 	resources_init();
 	int rc = create_rdma_resources();
     find_gid();
@@ -225,10 +240,10 @@ int SoR_connection::create_rdma_resources(){
     qp_init_attr.sq_sig_all = 1;
     qp_init_attr.send_cq = m_res.send_cq;
     qp_init_attr.recv_cq = m_res.recv_cq;
-    qp_init_attr.cap.max_send_wr = RECV_WINDOW_SIZE;//TODO : set the approperiate wr number
-    qp_init_attr.cap.max_recv_wr = RECV_WINDOW_SIZE;
-    qp_init_attr.cap.max_send_sge = 1;
-    qp_init_attr.cap.max_recv_sge = 1;
+    qp_init_attr.cap.max_send_wr = 2*RECV_WINDOW_SIZE;//TODO : set the approperiate wr number
+    qp_init_attr.cap.max_recv_wr = 2*RECV_WINDOW_SIZE;
+    qp_init_attr.cap.max_send_sge = 2;
+    qp_init_attr.cap.max_recv_sge = 2;
     m_res.qp = ibv_create_qp(m_res.pd, &qp_init_attr);
 
     if(!m_res.qp)
@@ -350,6 +365,9 @@ int SoR_connection::connect_to_peer(){
     for(int j = 0; j < RECV_WINDOW_SIZE;++j){
         post_receive();
     }
+
+    start_cqe_poller();
+
 
 connect_qp_exit:
 	return rc;
@@ -501,8 +519,6 @@ int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
     // 使用4字节固定长度存储数据长度
     uint32_t data_length = (uint32_t)__nbytes;  // 转换为32位固定长度
 
-    
-
     // 先写入4字节的数据长度
     size_t length_size = m_send_rb->write(&data_length, sizeof(uint32_t), 0);
     if(length_size < sizeof(uint32_t)) {
@@ -516,10 +532,6 @@ int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
         fprintf(stderr, "failed to write data, expected %zu, actual %zu\n", __nbytes, data_size);
         return -1;
     }
-
-
-
-
 
     sge.addr = (uintptr_t)m_send_rb->getDataPtr();
     sge.length = __nbytes+4; //要记得加报文头也就是这个传输的长度的4字节
@@ -587,7 +599,23 @@ int SoR_connection::post_receive(){
     rc = ibv_post_recv(m_res.qp, &rr, &bad_wr);
     if(rc)
     {
-        fprintf(stderr, "failed to post RR\n");
+        // 获取错误代码
+        int error_code = errno;
+        std::cerr << "ibv_post_recv failed with error code: " << error_code 
+                  << " (" << strerror(error_code) << ")" << std::endl;
+
+        // 可以根据具体的错误代码进行更细致的处理
+        switch (error_code) {
+            case EINVAL:
+                std::cerr << "Invalid value provided in QP, WR, or bad_wr." << std::endl;
+                break;
+            case ENOMEM:
+                std::cerr << "Not enough memory to post the receive request." << std::endl;
+                break;
+            default:
+                std::cerr << "Unknown error." << std::endl;
+                break;
+        }
     }
     else
     {
@@ -702,22 +730,25 @@ int SoR_connection::poll_recv_completion() {
         
        //m_recv_rb->updateTail(wc.byte_len);//更新tail指针和size
 
-        
-        //读取这一个段的长度并更新实际长度
-        uint32_t this_seg_len;
-        //size_t this_seg_len ;
-        m_recv_rb->peek(&this_seg_len, 4);
+
+        //说实话没搞明白到底需不需要这个字节序转换，先放着
+        uint32_t this_seg_len_net;  // 网络字节序的长度
+        m_recv_rb->peek(&this_seg_len_net, 4);
+
+        // 转换为主机字节序
+        uint32_t this_seg_len = ntohl(this_seg_len_net); 
 
 
-        m_recv_rb->add_true_data_size(this_seg_len);
+        m_recv_rb->add_true_data_size(this_seg_len_net);
 
         // 立即重新投递一个新的接收请求，保持接收队列饱满
-        post_receive();
+        //post_receive();
+        //这个时候还是不应该马上post recv，必须要在应用程序读取数据，真正消耗完一块缓冲区以后，才继续post recv，不然发送方永远不知道接收方已经满了，就会覆盖之前写入的数据
 
         // 更新接收窗口等统计信息
         recv_buffer_current -= wc.byte_len;
         
-        return 1;  // 返回接收到的数据长度
+        return this_seg_len_net;  // 返回接收到的数据长度
     }
 }
 
@@ -730,9 +761,6 @@ int SoR_connection::create_ringbuffer(size_t capacity){
     return 0;
 
 }
-
-
-
 
 
 SoRconn_collection::SoRconn_collection(){
