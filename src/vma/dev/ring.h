@@ -205,7 +205,7 @@ public:
         if (capacity == 0) {
             throw std::invalid_argument("Capacity must be greater than 0");
         }
-        buffer_.resize(capacity);
+        buffer_.resize(capacity, 0);
         //memset(buffer_, 0 , capacity_)
     }
 
@@ -316,12 +316,12 @@ public:
     size_t peek(void* data, size_t len) const {
         if (len == 0 || empty()) return 0;
         
-        len = std::min(len, size_);
+        //len = std::min(len, size_);
         unsigned char* dst = static_cast<unsigned char*>(data);
         
         // 计算连续可读取空间
-        size_t contiguous = capacity_ - head_;
-        size_t to_read = std::min(len, contiguous);
+        //size_t contiguous = capacity_ - head_;
+        //size_t to_read = std::min(len, contiguous);
         
         // 读取第一部分
         memcpy(dst, &buffer_[head_], to_read);

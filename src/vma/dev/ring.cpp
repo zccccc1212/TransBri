@@ -518,6 +518,9 @@ int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
     }
 
 
+
+
+
     sge.addr = (uintptr_t)m_send_rb->getDataPtr();
     sge.length = __nbytes+4; //要记得加报文头也就是这个传输的长度的4字节
     sge.lkey = m_res.send_mr->lkey;
@@ -588,7 +591,7 @@ int SoR_connection::post_receive(){
     }
     else
     {
-        fprintf(stdout, "Receive Request was posted\n");
+        //fprintf(stdout, "Receive Request was posted\n");
     }
     return rc;
 }
@@ -646,7 +649,7 @@ size_t SoR_connection::poll_send_completion() {
         m_send_rb->updateHead(data_size);
 
 
-        send_buffer_current -= wc.data_size;
+        send_buffer_current -= data_size;
         
         return data_size-4;  // 成功
     }
@@ -701,7 +704,8 @@ int SoR_connection::poll_recv_completion() {
 
         
         //读取这一个段的长度并更新实际长度
-        size_t this_seg_len ;
+        uint32_t this_seg_len;
+        //size_t this_seg_len ;
         m_recv_rb->peek(&this_seg_len, 4);
 
 
