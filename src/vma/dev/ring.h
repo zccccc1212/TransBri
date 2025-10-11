@@ -452,9 +452,9 @@ public:
 
     // 更新 head 指针（当外部直接读取了数据后调用）
     void updateHead(size_t bytes_processed) {
-        if (bytes_processed > size_) {
+        /*if (bytes_processed > size_) {
             throw std::invalid_argument("Processed bytes exceed current size");
-        }
+        }*/
         
         head_ = (head_ + bytes_processed) % capacity_;
         size_ -= bytes_processed;
@@ -467,9 +467,9 @@ public:
 
     // 更新 tail 指针（当外部直接写入了数据后调用）
     void updateTail(size_t bytes_added) {
-        if (bytes_added > available()) {
+        /*if (bytes_added > available()) {
             throw std::invalid_argument("Added bytes exceed available space");
-        }
+        }*/
 
         tail_ = (tail_ + bytes_added) % capacity_;
         size_ += bytes_added;

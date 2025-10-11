@@ -3316,7 +3316,7 @@ process_recv_data:
 				//更新这一块recv段窗口数据的大小
 				data_length -= need_to_read;
 				p_sor_conn->m_recv_rb->writeBeforeHead(&data_length);
-				p_sor_conn->post_receive();
+				//p_sor_conn->post_receive();
 				return total_read;
 			}
 			p_sor_conn->m_recv_rb->read(__buf, data_length, 1);
@@ -3344,14 +3344,14 @@ process_recv_data:
 					//更新这一块recv窗口数据的大小
 					data_length -= need_to_read;
 					p_sor_conn->m_recv_rb->writeBeforeHead(&data_length);
-					p_sor_conn->post_receive();
+					//p_sor_conn->post_receive();
 					return total_read;
 				}
 				p_sor_conn->m_recv_rb->read(__buf, data_length, 1);
 				total_read += data_length;
 				need_to_read -= data_length;
 				p_sor_conn->m_recv_rb->updateHead(RECV_SIZE-data_length-4);
-				p_sor_conn->post_receive();
+				//p_sor_conn->post_receive();
 			}
 		}
 	}

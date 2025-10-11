@@ -42,7 +42,7 @@
 
 //zc add
 /* poll CQ timeout in millisec (2 seconds) */
-#define MAX_POLL_CQ_TIMEOUT 2000
+#define MAX_POLL_CQ_TIMEOUT 20000
 
 #define MSG_SIZE 64
 #define MR_SIZE 4294967296
@@ -524,7 +524,7 @@ int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
 
 
     // 从内存池获取跟踪对象
-    rdma_op_data* tracker = g_rdma_pool.allocate(sge.addr, sge.length, 0);  // 0=发送
+    rdma_op_data* tracker = g_rdma_pool->allocate((void *)sge.addr, sge.length, 0);  // 0=发送
 
     /* prepare the send work request */
     memset(&sr, 0, sizeof(sr));
@@ -640,15 +640,15 @@ size_t SoR_connection::poll_send_completion() {
                data_addr, data_size);
         
         // 清理资源
-        g_rdma_pool.deallocate(tracker);
+        g_rdma_pool->deallocate(tracker);
         
         // 更新发送窗口等统计信息
         m_send_rb->updateHead(data_size);
 
 
-        send_buffer_current -= wc.byte_len;
+        send_buffer_current -= wc.data_size;
         
-        return wc.byte_len-4;  // 成功
+        return data_size-4;  // 成功
     }
 }
 
