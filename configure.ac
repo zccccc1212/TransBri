@@ -110,8 +110,13 @@ show_section_title "Configure build tools"
 LT_INIT([disable-static])
 AC_PROG_CC
 AC_PROG_CXX
+
+# Enable C++17 support
+CXXFLAGS="$CXXFLAGS -std=c++17"
+
 AC_PROG_YACC
 AM_PROG_LEX
+
 
 # Check for pkg-config package
 #

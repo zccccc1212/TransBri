@@ -111,6 +111,9 @@ public:
 	ssize_t write( __const void *__buf, size_t __nbytes);
 	ssize_t read( void *__buf, size_t __nbytes);
 
+	ssize_t rx(void *__buf, size_t __nbytes, int __flags);
+	ssize_t tx(__const void *__buf, size_t __nbytes, int __flags);
+
 
 
 private:

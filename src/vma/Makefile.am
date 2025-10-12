@@ -48,6 +48,9 @@ lib_LTLIBRARIES = libvma.la
 AM_CPPFLAGS := \
 	-I$(top_srcdir)/src ${LIBNL_CFLAGS}
 
+AM_CXXFLAGS = -std=c++17
+
+
 libvma_la_LDFLAGS := -no-undefined -version-number @PRJ_LIBRARY_MAJOR@:@PRJ_LIBRARY_MINOR@:@PRJ_LIBRARY_REVISION@ 
 
 libvma_la_LIBADD = \

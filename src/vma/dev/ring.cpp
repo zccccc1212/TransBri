@@ -214,7 +214,7 @@ int SoR_connection::create_rdma_resources(){
     
     mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE ;
 
-    m_res.send_mr = ibv_reg_mr(m_res.pd, m_send_rb->getBufferPtr(), MR_SIZE, mr_flags);
+    m_res.send_mr = ibv_reg_mr(m_res.pd, m_send_rb->getBufferStartAddress(), MR_SIZE, mr_flags);
 	if(!m_res.send_mr)
     {
         fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
@@ -222,9 +222,9 @@ int SoR_connection::create_rdma_resources(){
         goto resources_create_exit;
     }
 	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-            m_send_rb->getBufferPtr(), m_res.send_mr->lkey, m_res.send_mr->rkey, mr_flags);
+            m_send_rb->getBufferStartAddress(), m_res.send_mr->lkey, m_res.send_mr->rkey, mr_flags);
 
-    m_res.recv_mr = ibv_reg_mr(m_res.pd, m_recv_rb->getBufferPtr(), MR_SIZE, mr_flags);
+    m_res.recv_mr = ibv_reg_mr(m_res.pd, m_recv_rb->getBufferStartAddress(), MR_SIZE, mr_flags);
     if(!m_res.recv_mr)
     {
         fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
@@ -232,7 +232,7 @@ int SoR_connection::create_rdma_resources(){
         goto resources_create_exit;
     }
 	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-            m_recv_rb->getBufferPtr(), m_res.recv_mr->lkey, m_res.recv_mr->rkey, mr_flags);
+            m_recv_rb->getBufferStartAddress(), m_res.recv_mr->lkey, m_res.recv_mr->rkey, mr_flags);
 
 	/* create the Queue Pair */
 	memset(&qp_init_attr, 0, sizeof(qp_init_attr));
@@ -327,7 +327,7 @@ int SoR_connection::connect_to_peer(){
     int rc;
 
 	//prepare local rdma data to trans 
-	local_con_data.addr = htonll((uintptr_t)m_recv_rb->getBufferPtr());
+	local_con_data.addr = htonll((uintptr_t)m_recv_rb->getBufferStartAddress());
     local_con_data.rkey = htonl(m_res.recv_mr->rkey);
     local_con_data.qp_num = htonl(m_res.qp->qp_num);
     local_con_data.lid = htons(m_res.port_attr.lid);
@@ -533,7 +533,7 @@ int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
         return -1;
     }
 
-    sge.addr = (uintptr_t)m_send_rb->getDataPtr();
+    sge.addr = (uintptr_t)m_send_rb->getHeadAddress();
     sge.length = __nbytes+4; //要记得加报文头也就是这个传输的长度的4字节
     sge.lkey = m_res.send_mr->lkey;
 
@@ -575,7 +575,7 @@ int SoR_connection::post_receive(){
     /* prepare the scatter/gather entry */
     memset(&sge, 0, sizeof(sge));
 
-    sge.addr = (uintptr_t)  m_recv_rb->getContiguousWriteBlock();
+    sge.addr = (uintptr_t)  m_recv_rb->getTailAddress();
     sge.length = RECV_SIZE;
     sge.lkey = m_res.recv_mr->lkey;
 
@@ -667,8 +667,7 @@ size_t SoR_connection::poll_send_completion() {
         size_t data_size = tracker->data_size;
 
 
-        printf("Send completed - Data addr: %p, Size: %zu\n", 
-               data_addr, data_size);
+        printf("Send completed - Data addr: %p, Size: %zu\n",  data_addr, data_size);
         
         // 清理资源
         g_rdma_pool->deallocate(tracker);
@@ -738,6 +737,7 @@ int SoR_connection::poll_recv_completion() {
         // 转换为主机字节序
         uint32_t this_seg_len = ntohl(this_seg_len_net); 
 
+        printf("this seg len net : %d , this seg len : %d \n", this_seg_len_net,this_seg_len );
 
         m_recv_rb->add_true_data_size(this_seg_len_net);
 
@@ -754,13 +754,51 @@ int SoR_connection::poll_recv_completion() {
 
 
 int SoR_connection::create_ringbuffer(size_t capacity){
-    RingBuffer * sendbuf = new RingBuffer(capacity);
-    RingBuffer * recvbuf = new RingBuffer(capacity);
+    RingBuffer * sendbuf = new RingBuffer(capacity, 1);
+    RingBuffer * recvbuf = new RingBuffer(capacity, 0);
     m_send_rb = sendbuf;
     m_recv_rb = recvbuf;
     return 0;
 
 }
+
+// 启动轮询线程
+void SoR_connection::start_cqe_poller() {
+    if (m_cqe_poller) {
+        m_cqe_poller->start();
+    }
+}
+
+// 停止轮询线程
+void SoR_connection::stop_cqe_poller() {
+    if (m_cqe_poller) {
+        m_cqe_poller->stop();
+    }
+}
+
+// 发送数据时通知轮询线程
+int SoR_connection::post_send_notify(__const void* data, size_t size) {
+    int rc = post_send(data, size);  // 原来的post_send函数
+    if (rc == 0 && m_cqe_poller) {
+        m_cqe_poller->notify_send_work();
+    }
+    return rc;
+}
+/*
+// 获取统计信息
+void SoR_connection::get_poller_stats(uint64_t& send_completions, uint64_t& recv_completions,
+                     uint64_t& send_errors, uint64_t& recv_errors) {
+    if (m_cqe_poller) {
+        m_cqe_poller->get_stats(send_completions, recv_completions, 
+                               send_errors, recv_errors);
+    }
+}
+*/
+
+
+
+
+
 
 
 SoRconn_collection::SoRconn_collection(){
@@ -825,6 +863,8 @@ void SoRconn_collection::clear(){
     }
     m_conn_map.clear();
 }
+
+
 
 
 

@@ -38,6 +38,13 @@
 #include <mutex>
 #include <shared_mutex>
 #include <atomic>
+#include <condition_variable>
+#include <thread>
+#include <pthread.h>
+#include <sched.h>
+#include <sys/sysinfo.h>
+
+
 
 #include "vma/ib/base/verbs_extra.h"
 #include "vma/proto/flow_tuple.h"
@@ -261,16 +268,16 @@ public:
     // 获取所占用的空间的大小 - 使用原子变量避免锁
     size_t size() const { return atomic_size_.load(std::memory_order_acquire); }
     
+
+    size_t getHead() const {return head_;}
+
+    size_t getTail() const {return tail_;}
+
+
     // 获取真正存储的数据量 - 需要读锁
     size_t true_data_size() const { 
         std::shared_lock lock(rw_mutex_);
         return true_data_size_; 
-    }
-
-    // 添加真正数据大小 - 需要写锁
-    void add_true_data_size(size_t adddata) { 
-        std::unique_lock lock(rw_mutex_);
-        true_data_size_ += adddata; 
     }
 
     // 获取剩余空间 - 使用原子变量避免锁
@@ -341,18 +348,6 @@ public:
             notify_data_arrival();
         }
     }
-
-
-
-
-
-
-
-
-
-
-
-
 
     // 等待可用空间的函数
     void wait_available(size_t required_size, int timeout_ms = 5000) {
@@ -593,7 +588,7 @@ public:
             return contiguous;
         }
     }
-
+/*
     // 更新 head 指针（当外部直接读取了数据后调用）
     void updateHead(size_t bytes_processed) {
         std::unique_lock lock(rw_mutex_);
@@ -609,7 +604,7 @@ public:
         // 更新原子变量
         atomic_size_.store(size_, std::memory_order_release);
         atomic_available_.store(capacity_ - size_, std::memory_order_release);
-    }
+    }*/
 
     // 更新head指针时（数据被消费后）更新available
     void updateHead(size_t bytes_processed) {
@@ -619,8 +614,9 @@ public:
         size_ -= bytes_processed;
         
         // 更新原子变量
+        atomic_size_.store(size_, std::memory_order_release);
         atomic_available_.store(capacity_ - size_, std::memory_order_release);
-        
+
         // 如果缓冲区为空，重置指针
         if (size_ == 0) {
             head_ = tail_ = 0;
@@ -651,14 +647,50 @@ public:
                capacity_, size_, capacity_ - size_, head_, tail_, true_data_size_);
     }
 
-    // 获取内部缓冲区指针（谨慎使用，需要外部同步）
-    unsigned char* getBufferPtr() {
+    /**
+     * 获取缓冲区数据存储的真实起始地址
+     * @return 指向缓冲区起始位置的指针
+     * @note 这个地址是缓冲区内存块的起始位置，不一定是有效数据的起始位置
+     */
+    unsigned char* getBufferStartAddress() {
         return buffer_.data();
     }
 
-    const unsigned char* getBufferPtr() const {
+    const unsigned char* getBufferStartAddress() const {
         return buffer_.data();
     }
+
+    /**
+     * 获取tail指针当前指向的地址（写入位置）
+     * @return 指向当前写入位置的指针
+     * @note 如果缓冲区为空，返回的地址可能无效
+     */
+    unsigned char* getTailAddress() {
+        std::shared_lock lock(rw_mutex_);
+        return &buffer_[tail_];
+    }
+
+    const unsigned char* getTailAddress() const {
+        std::shared_lock lock(rw_mutex_);
+        return &buffer_[tail_];
+    }
+
+    /**
+     * 获取head指针当前指向的地址（读取位置）
+     * @return 指向当前读取位置的指针
+     * @note 如果缓冲区为空，返回的地址可能无效
+     */
+    unsigned char* getHeadAddress() {
+        std::shared_lock lock(rw_mutex_);
+        return &buffer_[head_];
+    }
+
+    const unsigned char* getHeadAddress() const {
+        std::shared_lock lock(rw_mutex_);
+        return &buffer_[head_];
+    }
+
+
 
     // 手动加锁方法（用于需要连续多个操作的情况）
     void lock_read() const { rw_mutex_.lock_shared(); }
@@ -667,6 +699,14 @@ public:
     void unlock_write() { rw_mutex_.unlock(); }
 };
 
+
+
+
+
+class CQEPoller;
+
+
+
 class SoR_connection{
 private:
 	int m_fd;	
@@ -674,14 +714,14 @@ private:
     uint64_t cur_send_wr_id;
     uint64_t cur_recv_wr_id;
 
-	struct resources m_res;
+	
 	int m_qpn;
 	int m_recv_cqn;
 	int m_send_cqn;
-	int send_buffer_total;
-	int recv_buffer_total;
-	int send_buffer_current;
-	int recv_buffer_current;
+	long int send_buffer_total;
+	long int recv_buffer_total;
+	long int send_buffer_current;
+	long int recv_buffer_current;
 	
 
 	union ibv_gid my_gid;
@@ -690,6 +730,9 @@ private:
 
 
 public:
+
+
+    struct resources m_res;
 
     RingBuffer * m_send_rb;
 	RingBuffer * m_recv_rb;
@@ -716,36 +759,17 @@ public:
     int poll_recv_completion();  // 专门轮询接收完成
 
     // 启动轮询线程
-    void start_cqe_poller() {
-        if (m_cqe_poller) {
-            m_cqe_poller->start();
-        }
-    }
+    void start_cqe_poller();
 
     // 停止轮询线程
-    void stop_cqe_poller() {
-        if (m_cqe_poller) {
-            m_cqe_poller->stop();
-        }
-    }
+    void stop_cqe_poller() ;
 
     // 发送数据时通知轮询线程
-    int post_send_notify(void* data, size_t size) {
-        int rc = post_send(data, size);  // 原来的post_send函数
-        if (rc == 0 && m_cqe_poller) {
-            m_cqe_poller->notify_send_work();
-        }
-        return rc;
-    }
+    int post_send_notify(__const void* data, size_t size);
 
     // 获取统计信息
-    void get_poller_stats(uint64_t& send_completions, uint64_t& recv_completions,
-                         uint64_t& send_errors, uint64_t& recv_errors) {
-        if (m_cqe_poller) {
-            m_cqe_poller->get_stats(send_completions, recv_completions, 
-                                   send_errors, recv_errors);
-        }
-    }
+    //void get_poller_stats(uint64_t& send_completions, uint64_t& recv_completions,
+    //                     uint64_t& send_errors, uint64_t& recv_errors);
 
 };
 
@@ -847,6 +871,91 @@ public:
 extern simple_rdma_pool* g_rdma_pool;
 
 
+class ThreadAffinity {
+public:
+    // 设置当前线程的CPU亲和性
+    static bool set_current_thread_affinity(int cpu_core) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(cpu_core, &cpuset);
+        
+        pthread_t current_thread = pthread_self();
+        int result = pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
+        
+        if (result != 0) {
+            fprintf(stderr, "Failed to set thread affinity to core %d: %s\n", 
+                    cpu_core, strerror(result));
+            return false;
+        }
+        
+        // 验证设置是否成功
+        CPU_ZERO(&cpuset);
+        result = pthread_getaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
+        if (result == 0 && CPU_ISSET(cpu_core, &cpuset)) {
+            printf("Thread successfully bound to CPU core %d\n", cpu_core);
+            return true;
+        } else {
+            fprintf(stderr, "Failed to verify thread affinity setting\n");
+            return false;
+        }
+    }
+    
+    // 设置指定线程的CPU亲和性
+    static bool set_thread_affinity(std::thread& thread, int cpu_core) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(cpu_core, &cpuset);
+        
+        pthread_t native_handle = thread.native_handle();
+        int result = pthread_setaffinity_np(native_handle, sizeof(cpu_set_t), &cpuset);
+        
+        if (result != 0) {
+            fprintf(stderr, "Failed to set thread affinity to core %d: %s\n", 
+                    cpu_core, strerror(result));
+            return false;
+        }
+        return true;
+    }
+    
+    // 获取系统CPU核心数量
+    static int get_cpu_count() {
+        return get_nprocs();
+    }
+    
+    // 检查CPU核心是否有效
+    static bool is_valid_core(int cpu_core) {
+        int cpu_count = get_cpu_count();
+        return (cpu_core >= 0 && cpu_core < cpu_count);
+    }
+    
+    // 设置线程调度策略（实时优先级）
+    static bool set_thread_scheduling(int policy = SCHED_FIFO, int priority = 80) {
+        struct sched_param param;
+        param.sched_priority = priority;
+        
+        int result = pthread_setschedparam(pthread_self(), policy, &param);
+        if (result != 0) {
+            fprintf(stderr, "Failed to set thread scheduling: %s\n", strerror(result));
+            return false;
+        }
+        
+        printf("Thread scheduling set to policy=%d, priority=%d\n", policy, priority);
+        return true;
+    }
+    
+    // 设置线程名称（便于调试）
+    static bool set_thread_name(const char* name) {
+        int result = pthread_setname_np(pthread_self(), name);
+        if (result != 0) {
+            fprintf(stderr, "Failed to set thread name: %s\n", strerror(result));
+            return false;
+        }
+        return true;
+    }
+};
+
+
+
 class CQEPoller {
 private:
     SoR_connection* m_connection;
@@ -871,10 +980,18 @@ private:
 
 public:
     struct ThreadConfig {
-        int cpu_core = -1;                    // -1表示不绑定核心
-        bool realtime_scheduling = false;     // 是否启用实时调度
-        std::string thread_name = "CQE-Poller"; // 线程名称
-        int scheduling_priority = 80;         // 调度优先级
+        int cpu_core;                    // -1表示不绑定核心
+        bool realtime_scheduling;        // 是否启用实时调度
+        std::string thread_name;         // 线程名称
+        int scheduling_priority;         // 调度优先级
+        
+        // 构造函数设置默认值
+        ThreadConfig() 
+            : cpu_core(-1)
+            , realtime_scheduling(false)
+            , thread_name("CQE-Poller")
+            , scheduling_priority(80)
+        {}
     };
 
     CQEPoller(SoR_connection* conn, const ThreadConfig& config = ThreadConfig()) 
@@ -1092,7 +1209,7 @@ private:
             void* data_addr = tracker->data_addr;
             size_t data_size = tracker->data_size;
             
-            printf("Send completed - Data addr: %p, Size: %zu , send buf head : %ld, tail : %d \n", data_addr, data_size, m_connection->m_send_rb->getHead(), m_connection->m_send_rb->getTail());
+            printf("Send completed - Data addr: %p, Size: %zu , send buf head : %ld, tail : %ld \n", data_addr, data_size, m_connection->m_send_rb->getHead(), m_connection->m_send_rb->getTail());
             
             // 清理资源
             if (g_rdma_pool) {
@@ -1103,10 +1220,10 @@ private:
             if (m_connection->m_send_rb) {
                 m_connection->m_send_rb->updateHead(data_size);
             }
-            
+            /*
             if (m_connection->send_buffer_current >= data_size) {
                 m_connection->send_buffer_current -= data_size;
-            }
+            }*/
             
             m_send_completions++;
         }
@@ -1123,7 +1240,7 @@ private:
             //说实话没搞明白到底需不需要这个字节序转换，先放着
 
             uint32_t this_seg_len_net;  // 网络字节序的长度
-            m_recv_rb->peek(&this_seg_len_net, 4);
+            m_connection->m_recv_rb->peek(&this_seg_len_net, 4);
 
             // 转换为主机字节序
             uint32_t this_seg_len = ntohl(this_seg_len_net);
