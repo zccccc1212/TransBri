@@ -240,8 +240,8 @@ int SoR_connection::create_rdma_resources(){
     qp_init_attr.sq_sig_all = 1;
     qp_init_attr.send_cq = m_res.send_cq;
     qp_init_attr.recv_cq = m_res.recv_cq;
-    qp_init_attr.cap.max_send_wr = 2*RECV_WINDOW_SIZE;//TODO : set the approperiate wr number
-    qp_init_attr.cap.max_recv_wr = 2*RECV_WINDOW_SIZE;
+    qp_init_attr.cap.max_send_wr = 1+RECV_WINDOW_SIZE;//TODO : set the approperiate wr number
+    qp_init_attr.cap.max_recv_wr = 1+RECV_WINDOW_SIZE;
     qp_init_attr.cap.max_send_sge = 2;
     qp_init_attr.cap.max_recv_sge = 2;
     m_res.qp = ibv_create_qp(m_res.pd, &qp_init_attr);
@@ -520,8 +520,8 @@ int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
     uint32_t data_length = (uint32_t)__nbytes;  // 转换为32位固定长度
 
     // 先写入4字节的数据长度
-    size_t length_size = m_send_rb->write(&data_length, sizeof(uint32_t), 0);
-    if(length_size < sizeof(uint32_t)) {
+    size_t length_size = m_send_rb->write(&data_length, 4, 0);
+    if(length_size < 4) {
         fprintf(stderr, "failed to write data length\n");
         return -1;
     }
@@ -620,6 +620,117 @@ int SoR_connection::post_receive(){
     else
     {
         //fprintf(stdout, "Receive Request was posted\n");
+    }
+    return rc;
+}
+
+int SoR_connection::post_send_with_imm(__const void *__buf, size_t __nbytes){
+    struct ibv_send_wr sr;
+    struct ibv_sge sge;
+    struct ibv_send_wr *bad_wr = NULL;
+    int rc;
+
+    /* prepare the scatter/gather entry */
+    memset(&sge, 0, sizeof(sge));
+
+    // 使用4字节固定长度存储数据长度
+    uint32_t data_length = (uint32_t)__nbytes;  // 转换为32位固定长度
+
+    // 不用写入长度了，用立即数代替长度
+
+    // 再写入实际数据
+    size_t data_size = m_send_rb->write(__buf, __nbytes, 1);
+    if(data_size < __nbytes) {
+        fprintf(stderr, "failed to write data, expected %zu, actual %zu\n", __nbytes, data_size);
+        return -1;
+    }
+
+    sge.addr = (uintptr_t)m_send_rb->getHeadAddress();
+    sge.length = __nbytes;
+    sge.lkey = m_res.send_mr->lkey;
+
+    // 从内存池获取跟踪对象
+    rdma_op_data* tracker = g_rdma_pool->allocate((void *)sge.addr, sge.length, 0);  // 0=发送
+
+    /* prepare the send work request */
+    memset(&sr, 0, sizeof(sr));
+    sr.next = NULL;
+    sr.wr_id = (uint64_t)tracker; // 将wr_id设置为rdma_op_data对应的结构的地址，直接方便查询
+    
+    cur_send_wr_id++;
+
+    sr.sg_list = &sge;
+    sr.num_sge = 1;
+    sr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM; // 改为带立即数的RDMA WRITE
+    
+    // 设置立即数 - 通常用于携带元数据，比如数据长度、操作类型等
+    sr.imm_data = htonl(data_length); // 将数据长度作为立即数发送
+    
+    // 设置RDMA WRITE的目标地址信息
+    sr.wr.rdma.remote_addr = m_remote_addr; // 需要预先获取的远程内存地址
+    sr.wr.rdma.rkey = m_remote_rkey;        // 需要预先获取的远程rkey
+    
+    sr.send_flags = IBV_SEND_SIGNALED;
+
+    /* 执行RDMA WRITE操作 */
+    rc = ibv_post_send(m_res.qp, &sr, &bad_wr);
+    if(rc)
+    {
+        fprintf(stderr, "failed to post RDMA WRITE with immediate\n");
+    }
+    else
+    {
+        fprintf(stdout, "RDMA WRITE with immediate was posted, data length: %u\n", data_length);
+    }
+    return rc;
+}
+
+int SoR_connection::post_receive_with_imm(){
+    struct ibv_recv_wr rr;
+    struct ibv_sge sge;
+    struct ibv_recv_wr *bad_wr;
+    int rc;
+
+    /* prepare the scatter/gather entry */
+    memset(&sge, 0, sizeof(sge));
+
+    sge.addr = (uintptr_t)m_recv_rb->getTailAddress();
+    sge.length = RECV_SIZE;
+    sge.lkey = m_res.recv_mr->lkey;
+
+    m_recv_rb->updateTail(RECV_SIZE);
+
+    /* prepare the receive work request */
+    memset(&rr, 0, sizeof(rr));
+    rr.next = NULL;
+    rr.wr_id = (uint64_t)cur_recv_wr_id;
+    
+    cur_recv_wr_id++;
+
+    rr.sg_list = &sge;
+    rr.num_sge = 1;
+
+    /* post the Receive Request to the RQ */
+    rc = ibv_post_recv(m_res.qp, &rr, &bad_wr);
+    if(rc)
+    {
+        // 获取错误代码
+        int error_code = errno;
+        std::cerr << "ibv_post_recv failed with error code: " << error_code 
+                  << " (" << strerror(error_code) << ")" << std::endl;
+
+        // 可以根据具体的错误代码进行更细致的处理
+        switch (error_code) {
+            case EINVAL:
+                std::cerr << "Invalid value provided in QP, WR, or bad_wr." << std::endl;
+                break;
+            case ENOMEM:
+                std::cerr << "Not enough memory to post the receive request." << std::endl;
+                break;
+            default:
+                std::cerr << "Unknown error." << std::endl;
+                break;
+        }
     }
     return rc;
 }

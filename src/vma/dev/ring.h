@@ -755,8 +755,15 @@ public:
     int post_send(__const void *__buf, size_t __nbytes);
 	int post_receive();
 
+    
+    int post_send_with_imm(__const void *__buf, size_t __nbytes);
+    int post_receive_with_imm();
+
+
     size_t poll_send_completion();  // 专门轮询发送完成
     int poll_recv_completion();  // 专门轮询接收完成
+
+
 
     // 启动轮询线程
     void start_cqe_poller();

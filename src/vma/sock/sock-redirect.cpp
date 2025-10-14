@@ -3179,8 +3179,6 @@ ssize_t Sockfd_tcp::rx(void *__buf, size_t __nbytes, int __flags){
     //printf("recv initial check: %ld μs, available data: %zu, requested: %zu\n", 
     //       check_duration.count(), recved_sz, __nbytes);
     if (recved_sz > 0) {
-    //if (recved_sz >= __nbytes) {
-        // 有足够数据，直接处理
         goto process_recv_data;
     } 
     else {
@@ -3193,7 +3191,6 @@ ssize_t Sockfd_tcp::rx(void *__buf, size_t __nbytes, int __flags){
         
         recved_sz = p_sor_conn->m_recv_rb->true_data_size();
         if (recved_sz > 0) {
-        //if (recved_sz >= __nbytes) {
             goto process_recv_data;
         }
         else {
@@ -3212,7 +3209,6 @@ ssize_t Sockfd_tcp::rx(void *__buf, size_t __nbytes, int __flags){
             recved_sz = p_sor_conn->m_recv_rb->true_data_size();
             //printf("After wait: available data: %zu\n", recved_sz);
             if (recved_sz > 0) {
-            //if (recved_sz >= __nbytes) {
                 goto process_recv_data;
             }
             else {
@@ -3231,47 +3227,19 @@ ssize_t Sockfd_tcp::rx(void *__buf, size_t __nbytes, int __flags){
                     // 对于阻塞socket，返回0表示连接关闭？
                     return 0;
                 }
-                
-                // 有多少读多少
-                size_t data_length;
-                while (total_read < recved_sz) {
-                    p_sor_conn->m_recv_rb->read(&data_length, 4, 0); // 读取数据段长度
-                    
-                    if (data_length > need_to_read) {
-                        p_sor_conn->m_recv_rb->read(__buf, need_to_read, 1);
-                        total_read += need_to_read;
-                        
-                        // 更新剩余数据长度
-                        data_length -= need_to_read;
-                        p_sor_conn->m_recv_rb->writeBeforeHead(&data_length);
-                        break;
-                    }
-                    
-                    p_sor_conn->m_recv_rb->read(__buf, data_length, 1);
-                    total_read += data_length;
-                    need_to_read -= data_length;
-                    p_sor_conn->m_recv_rb->updateHead(RECV_SIZE - data_length - 4);
-                    p_sor_conn->post_receive();
-                }
-                
-                //auto end_time = std::chrono::steady_clock::now();
-                //auto total_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
-                //printf("recv total time: %ld μs, returned partial data: %zu bytes\n", 
-                //       total_duration.count(), total_read);
-                
-                return total_read;
             }
         }
     }
 
 process_recv_data:
     // 处理完整的数据
-	need_to_read = recved_sz;
+	need_to_read = __nbytes > recved_sz ? recved_sz : __nbytes;
+	size_t will_read = need_to_read;
     //need_to_read = __nbytes;
     size_t data_length;
     
     //auto process_start = std::chrono::steady_clock::now();
-    while (total_read < need_to_read) {
+    while (total_read < will_read) {
     //while (total_read < __nbytes) {
         p_sor_conn->m_recv_rb->read(&data_length, 4, 0); // 读取数据段长度
         
