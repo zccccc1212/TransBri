@@ -93,7 +93,8 @@ SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/){
     send_buffer_total = MR_SIZE;
     recv_buffer_total = MR_SIZE;
 	
-
+    m_recv_buf = MR_SIZE;
+    
     // 配置线程属性
     CQEPoller::ThreadConfig config;
     config.cpu_core = 4;                    // 绑定到CPU核心2
@@ -103,6 +104,7 @@ SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/){
 
     m_cqe_poller = new CQEPoller(this, config);
 
+    next_remote_to_write = 0;
     
 
 	resources_init();
@@ -234,6 +236,26 @@ int SoR_connection::create_rdma_resources(){
 	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
             m_recv_rb->getBufferStartAddress(), m_res.recv_mr->lkey, m_res.recv_mr->rkey, mr_flags);
 
+    //set the recv window as MR
+    
+    remote_recv_window_mr = ibv_reg_mr(m_res.pd, (void *)&remote_recv_buffer, sizeof(remote_recv_window_mr), mr_flags);
+    //remote_recv_window_mr = ibv_reg_mr(m_res.pd, (void *)&remote_recv_buffer, 4, mr_flags);
+
+    if(!remote_recv_window_mr){
+        fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
+    }
+    fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
+            (void *)&remote_recv_buffer, remote_recv_window_mr->lkey, remote_recv_window_mr->rkey, mr_flags);
+
+    my_recv_window_mr = ibv_reg_mr(m_res.pd, (void *)&m_recv_buf, sizeof(m_recv_buf), mr_flags);
+    //my_recv_window_mr = ibv_reg_mr(m_res.pd, (void *)&m_recv_buf, 4, mr_flags);
+    if(!remote_recv_window_mr){
+        fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
+    }
+    fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
+            (void *)&m_recv_buf, my_recv_window_mr->lkey, my_recv_window_mr->rkey, mr_flags);
+    
+
 	/* create the Queue Pair */
 	memset(&qp_init_attr, 0, sizeof(qp_init_attr));
     qp_init_attr.qp_type = IBV_QPT_RC;
@@ -331,6 +353,7 @@ int SoR_connection::connect_to_peer(){
     local_con_data.rkey = htonl(m_res.recv_mr->rkey);
     local_con_data.qp_num = htonl(m_res.qp->qp_num);
     local_con_data.lid = htons(m_res.port_attr.lid);
+    local_con_data.remote_recv_window_rkey = htonl(remote_recv_window_mr->rkey);
 
 	memcpy(local_con_data.gid, &my_gid, 16);
     fprintf(stdout, "\nLocal LID = 0x%x\n", m_res.port_attr.lid);
@@ -348,7 +371,14 @@ int SoR_connection::connect_to_peer(){
     remote_con_data.rkey = ntohl(tmp_con_data.rkey);
     remote_con_data.qp_num = ntohl(tmp_con_data.qp_num);
     remote_con_data.lid = ntohs(tmp_con_data.lid);
+    remote_con_data.recv_window_rkey = ntohs(tmp_con_data.recv_window_rkey);
+
     memcpy(remote_con_data.gid, tmp_con_data.gid, 16);
+
+    this->remote_recv_addr_start = remote_con_data.addr;
+    this->total_send = 0;
+    this->next_remote_to_write = remote_con_data.addr;
+    this->remote_recv_buffer = MR_SIZE;
 
 	/* save the remote side attributes, we will need it for the post SR */
     m_res.remote_props = remote_con_data;
@@ -363,7 +393,7 @@ int SoR_connection::connect_to_peer(){
 	}
 
     for(int j = 0; j < RECV_WINDOW_SIZE;++j){
-        post_receive();
+        post_receive_for_recv_window();
     }
 
     start_cqe_poller();
@@ -507,66 +537,8 @@ int SoR_connection::modify_qp_to_rts(){
     return rc;
 }
 
-int SoR_connection::post_send(__const void *__buf, size_t __nbytes){
-    struct ibv_send_wr sr;
-    struct ibv_sge sge;
-    struct ibv_send_wr *bad_wr = NULL;
-    int rc;
-
-    /* prepare the scatter/gather entry */
-    memset(&sge, 0, sizeof(sge));
-
-    // 使用4字节固定长度存储数据长度
-    uint32_t data_length = (uint32_t)__nbytes;  // 转换为32位固定长度
-
-    // 先写入4字节的数据长度
-    size_t length_size = m_send_rb->write(&data_length, 4, 0);
-    if(length_size < 4) {
-        fprintf(stderr, "failed to write data length\n");
-        return -1;
-    }
-
-    // 再写入实际数据
-    size_t data_size = m_send_rb->write(__buf, __nbytes, 1);
-    if(data_size < __nbytes) {
-        fprintf(stderr, "failed to write data, expected %zu, actual %zu\n", __nbytes, data_size);
-        return -1;
-    }
-
-    sge.addr = (uintptr_t)m_send_rb->getHeadAddress();
-    sge.length = __nbytes+4; //要记得加报文头也就是这个传输的长度的4字节
-    sge.lkey = m_res.send_mr->lkey;
-
-
-    // 从内存池获取跟踪对象
-    rdma_op_data* tracker = g_rdma_pool->allocate((void *)sge.addr, sge.length, 0);  // 0=发送
-
-    /* prepare the send work request */
-    memset(&sr, 0, sizeof(sr));
-    sr.next = NULL;
-    sr.wr_id = (uint64_t)tracker;//将wr_id设置为rdma_op_data对应的结构的地址，直接方便查询
-    
-    cur_send_wr_id++;
-
-    sr.sg_list = &sge;
-    sr.num_sge = 1;
-    sr.opcode = IBV_WR_SEND;
-    sr.send_flags = IBV_SEND_SIGNALED;
-
-    /* there is a Receive Request in the responder side, so we won't get any into RNR flow */
-    rc = ibv_post_send(m_res.qp, &sr, &bad_wr);
-    if(rc)
-    {
-        fprintf(stderr, "failed to post SR\n");
-    }
-    else
-    {
-        fprintf(stdout, "Send Request was posted\n");
-    }
-    return rc;
-}
-
-int SoR_connection::post_receive(){
+//post recv 对于使用imm的write，接收方也一定要提前post recv，只是recv中的sge 可以为空，也可以不为空，但是没有实际意义
+int SoR_connection::post_receive_for_recv_window(){
     struct ibv_recv_wr rr;
     struct ibv_sge sge;
     struct ibv_recv_wr *bad_wr;
@@ -575,15 +547,10 @@ int SoR_connection::post_receive(){
     /* prepare the scatter/gather entry */
     memset(&sge, 0, sizeof(sge));
 
-    sge.addr = (uintptr_t)  m_recv_rb->getTailAddress();
-    sge.length = RECV_SIZE;
-    sge.lkey = m_res.recv_mr->lkey;
-
-    m_recv_rb->updateTail(RECV_SIZE);
-
-
-    // 从内存池获取跟踪对象
-    //rdma_op_data* tracker = g_rdma_pool.allocate(sge.addr, sge.length, 1);  // 1=接收
+    //TODO: set the correct sge.addr
+    sge.addr = (uintptr_t)&remote_recv_buffer;
+    sge.length = 8;
+    sge.lkey = remote_recv_window_mr->lkey;
 
     /* prepare the receive work request */
     memset(&rr, 0, sizeof(rr));
@@ -624,35 +591,35 @@ int SoR_connection::post_receive(){
     return rc;
 }
 
-int SoR_connection::post_send_with_imm(__const void *__buf, size_t __nbytes){
-    struct ibv_send_wr sr;
-    struct ibv_sge sge;
-    struct ibv_send_wr *bad_wr = NULL;
-    int rc;
-
-    /* prepare the scatter/gather entry */
-    memset(&sge, 0, sizeof(sge));
-
-    // 使用4字节固定长度存储数据长度
-    uint32_t data_length = (uint32_t)__nbytes;  // 转换为32位固定长度
-
-    // 不用写入长度了，用立即数代替长度
-
-    // 再写入实际数据
-    size_t data_size = m_send_rb->write(__buf, __nbytes, 1);
+size_t SoR_connection::write_data_in_send_buf(__const void *__buf, size_t __nbytes){
+    size_t data_size = m_send_rb->write(__buf, __nbytes);
     if(data_size < __nbytes) {
         fprintf(stderr, "failed to write data, expected %zu, actual %zu\n", __nbytes, data_size);
         return -1;
     }
+    return data_size;
+}
 
+int SoR_connection::post_send_data_with_imm(){
+    struct ibv_send_wr sr;
+    struct ibv_sge sge;
+    struct ibv_send_wr *bad_wr = NULL;
+    int rc;
+    
+    size_t cur_data_size = m_send_rb->size();
+    size_t remote_recv_buf = get_remote_recv_buf();
+    uint32_t will_to_send = remote_recv_buf > cur_data_size ? cur_data_size : remote_recv_buf;
+    
+    // prepare the scatter/gather entry 
+    memset(&sge, 0, sizeof(sge));
     sge.addr = (uintptr_t)m_send_rb->getHeadAddress();
-    sge.length = __nbytes;
+    sge.length = will_to_send;
     sge.lkey = m_res.send_mr->lkey;
 
     // 从内存池获取跟踪对象
     rdma_op_data* tracker = g_rdma_pool->allocate((void *)sge.addr, sge.length, 0);  // 0=发送
 
-    /* prepare the send work request */
+    // prepare the send work request 
     memset(&sr, 0, sizeof(sr));
     sr.next = NULL;
     sr.wr_id = (uint64_t)tracker; // 将wr_id设置为rdma_op_data对应的结构的地址，直接方便查询
@@ -664,15 +631,16 @@ int SoR_connection::post_send_with_imm(__const void *__buf, size_t __nbytes){
     sr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM; // 改为带立即数的RDMA WRITE
     
     // 设置立即数 - 通常用于携带元数据，比如数据长度、操作类型等
-    sr.imm_data = htonl(data_length); // 将数据长度作为立即数发送
+    sr.imm_data = htonl(will_to_send); // 将数据长度作为立即数发送
     
-    // 设置RDMA WRITE的目标地址信息
-    sr.wr.rdma.remote_addr = m_remote_addr; // 需要预先获取的远程内存地址
-    sr.wr.rdma.rkey = m_remote_rkey;        // 需要预先获取的远程rkey
-    
-    sr.send_flags = IBV_SEND_SIGNALED;
+    total_send += will_to_send;
 
-    /* 执行RDMA WRITE操作 */
+    sr.wr.rdma.remote_addr = next_remote_to_write % MR_SIZE; // 需要预先获取的远程内存地址
+    sr.wr.rdma.rkey = m_res->remote_props.rkey;        // 需要预先获取的远程rkey
+    
+    next_remote_to_write += will_to_send;
+
+    // 执行RDMA WRITE操作 
     rc = ibv_post_send(m_res.qp, &sr, &bad_wr);
     if(rc)
     {
@@ -685,58 +653,75 @@ int SoR_connection::post_send_with_imm(__const void *__buf, size_t __nbytes){
     return rc;
 }
 
-int SoR_connection::post_receive_with_imm(){
-    struct ibv_recv_wr rr;
+size_t SoR_connection::sync_remote_recv_window(){
+    struct ibv_send_wr sr;
     struct ibv_sge sge;
-    struct ibv_recv_wr *bad_wr;
+    struct ibv_send_wr *bad_wr = NULL;
     int rc;
 
-    /* prepare the scatter/gather entry */
+    // prepare the scatter/gather entry 
     memset(&sge, 0, sizeof(sge));
+    sge.addr = (uintptr_t)&m_recv_buf;
+    sge.length = 8;
+    sge.lkey = my_recv_window_mr->lkey;
 
-    sge.addr = (uintptr_t)m_recv_rb->getTailAddress();
-    sge.length = RECV_SIZE;
-    sge.lkey = m_res.recv_mr->lkey;
+     // prepare the send work request 
+    memset(&sr, 0, sizeof(sr));
+    sr.next = NULL;
+    sr.wr_id = 1;
 
-    m_recv_rb->updateTail(RECV_SIZE);
+    sr.sg_list = &sge;
+    sr.num_sge = 1;
+    sr.opcode = IBV_WR_SEND; // RDMA SEND
 
-    /* prepare the receive work request */
-    memset(&rr, 0, sizeof(rr));
-    rr.next = NULL;
-    rr.wr_id = (uint64_t)cur_recv_wr_id;
-    
-    cur_recv_wr_id++;
-
-    rr.sg_list = &sge;
-    rr.num_sge = 1;
-
-    /* post the Receive Request to the RQ */
-    rc = ibv_post_recv(m_res.qp, &rr, &bad_wr);
+    rc = ibv_post_send(m_res.qp, &sr, &bad_wr);
     if(rc)
     {
-        // 获取错误代码
-        int error_code = errno;
-        std::cerr << "ibv_post_recv failed with error code: " << error_code 
-                  << " (" << strerror(error_code) << ")" << std::endl;
-
-        // 可以根据具体的错误代码进行更细致的处理
-        switch (error_code) {
-            case EINVAL:
-                std::cerr << "Invalid value provided in QP, WR, or bad_wr." << std::endl;
-                break;
-            case ENOMEM:
-                std::cerr << "Not enough memory to post the receive request." << std::endl;
-                break;
-            default:
-                std::cerr << "Unknown error." << std::endl;
-                break;
-        }
+        fprintf(stderr, "failed to post RDMA SEND\n");
+    }
+    else
+    {
+        fprintf(stdout, "RDMA send was posted, is used to sync remote recv window\n");
     }
     return rc;
 }
 
+bool SoR_connection::wait_remote_recv_buf() {
+    std::unique_lock<std::mutex> lock(m_recv_mutex);
+    
+    // 带超时的等待，避免永久阻塞
+    bool success = m_recv_cv.wait_for(lock, std::chrono::seconds(10), [this]() {
+        return m_data_ready;
+    });
+    
+    if (!success) {
+        // 超时处理
+        return false;
+    }
+    
+    m_data_ready = false;
+    return true;
+}
 
-//现阶段还是需要分两个cq，一个专门的发送cq，一个专门的接收cq
+// 唤醒等待的函数
+int SoR_connection::update_my_remote_recv_window_notify(){
+    {
+        std::lock_guard<std::mutex> lock(m_recv_mutex);
+        m_data_ready = true;
+    }
+    m_recv_cv.notify_one();  // 或者 notify_all() 根据需求
+}
+
+//现在有问题，如果是使用atomic操作让接收方通知发送方更新发送缓冲区，那么发送方怎么知道缓冲区更新了呢
+//或许可以维护两个值，主要是怕有冲突，一个是发送方发完一次数据以后记录接收方的大小，另一个也是，然后发送方下一次发送数据以前就比较这两个大小是否有更新，但是这样如果是阻塞情况下就不知道什么时候更新，因为没有通知
+//要不就设置一个超时循环，要不就选用带通知的方法
+//要不考虑为一个进程里面所有的socket都创建一个额外的接收缓冲区更新cq
+//其实可以直接用send和recv操作，直接写现在发送方还剩多大的数据就可以了
+//而且这个recv也会非常方便，每次post recv的大小和起始地址都是一样的其实
+//然后轮循到cqe以后根据cqe的类型，就可以知道是数据来了，还是控制流消息（更新窗口大小）来了，容易区分
+
+
+//主动轮询发送cq
 size_t SoR_connection::poll_send_completion() {
     struct ibv_wc wc;
     unsigned long start_time_msec;
@@ -767,34 +752,33 @@ size_t SoR_connection::poll_send_completion() {
             return -3;
         }
         
-        // 通过wr_id获取跟踪信息
-        rdma_op_data* tracker = (rdma_op_data*)wc.wr_id;
-        if (!tracker) {
-            fprintf(stderr, "invalid tracker in send completion\n");
-            return -4;
+        if(wc_array[i].opcode == IBV_WC_SEND){
+            //TODO 好像没什么要做的
+            printf("this send is to notify remote to update recv window\n");
         }
-        // 使用跟踪信息
-        void* data_addr = tracker->data_addr;
-        size_t data_size = tracker->data_size;
+        else if(wc_array[i].opcode == IBV_WC_RDMA_WRITE){
+            rdma_op_data* tracker = (rdma_op_data*)wc_array[i].wr_id;
+            if (!tracker) {
+                fprintf(stderr, "Invalid tracker in send completion\n");
+                continue;
+            }
+            size_t data_size = tracker->data_size;
+            // 清理资源
+            if (g_rdma_pool) {
+                g_rdma_pool->deallocate(tracker);
+            }
+            // 更新发送窗口
+            m_send_rb->updateHead(data_size);
+        }
+        else{
+            fprintf(stderr, "we don't expect to get a wc not send and write with imm \n");
+        }
 
-
-        printf("Send completed - Data addr: %p, Size: %zu\n",  data_addr, data_size);
-        
-        // 清理资源
-        g_rdma_pool->deallocate(tracker);
-        
-        // 更新发送窗口等统计信息
-        m_send_rb->updateHead(data_size);
-
-
-        send_buffer_current -= data_size;
-        
-        return data_size-4;  // 成功
+        return data_size;  // 成功
     }
 }
 
-
-int SoR_connection::poll_recv_completion() {
+size_t SoR_connection::poll_recv_completion() {
     struct ibv_wc wc;
     unsigned long start_time_msec;
     unsigned long cur_time_msec;
@@ -823,46 +807,24 @@ int SoR_connection::poll_recv_completion() {
             fprintf(stderr, "recv failed with status: 0x%x\n", wc.status);
             return -3;
         }
-        
-
-        /*
-        // 通过wr_id获取跟踪信息
-        rdma_op_data* tracker = (rdma_op_data*)wc.wr_id;
-        if (!tracker) {
-            fprintf(stderr, "invalid tracker in recv completion\n");
-            return -4;
+        if(wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM){
+            uint32_t imm_data = wc.imm;
+            uint32_t this_seg_len = ntohl(imm_data);
+            m_recv_rb->updateTail(this_seg_len);
+            update_my_recv_window_reduce(this_seg_len);
         }
-        
-        printf("Receive completed - Data addr: %p, Actual size: %d\n", 
-               tracker->data_addr, wc.byte_len);
-        
-        g_rdma_pool.deallocate(tracker);*/
-        
-       //m_recv_rb->updateTail(wc.byte_len);//更新tail指针和size
-
-
-        //说实话没搞明白到底需不需要这个字节序转换，先放着
-        uint32_t this_seg_len_net;  // 网络字节序的长度
-        m_recv_rb->peek(&this_seg_len_net, 4);
-
-        // 转换为主机字节序
-        uint32_t this_seg_len = ntohl(this_seg_len_net); 
-
-        printf("this seg len net : %d , this seg len : %d \n", this_seg_len_net,this_seg_len );
-
-        m_recv_rb->add_true_data_size(this_seg_len_net);
-
-        // 立即重新投递一个新的接收请求，保持接收队列饱满
-        //post_receive();
-        //这个时候还是不应该马上post recv，必须要在应用程序读取数据，真正消耗完一块缓冲区以后，才继续post recv，不然发送方永远不知道接收方已经满了，就会覆盖之前写入的数据
-
-        // 更新接收窗口等统计信息
-        recv_buffer_current -= wc.byte_len;
-        
-        return this_seg_len_net;  // 返回接收到的数据长度
+        else if (wc.opcode == IBV_WC_RECV)
+        {
+            //TODO notify sender recv window has updated
+            this->update_my_remote_recv_window_notify();
+            printf("this send is to notify remote to update recv window\n");
+        }
+        else{
+            fprintf(stderr, "we don't expect to get a wc not recv and recv with imm \n");
+        }
+        return 1;
     }
 }
-
 
 int SoR_connection::create_ringbuffer(size_t capacity){
     RingBuffer * sendbuf = new RingBuffer(capacity, 1);
@@ -895,19 +857,14 @@ int SoR_connection::post_send_notify(__const void* data, size_t size) {
     }
     return rc;
 }
-/*
-// 获取统计信息
-void SoR_connection::get_poller_stats(uint64_t& send_completions, uint64_t& recv_completions,
-                     uint64_t& send_errors, uint64_t& recv_errors) {
-    if (m_cqe_poller) {
-        m_cqe_poller->get_stats(send_completions, recv_completions, 
-                               send_errors, recv_errors);
+
+int SoR_connection::post_send_notify_with_imm() {
+    int rc = post_send_data_with_imm();  // 原来的post_send_data函数
+    if (rc == 0 && m_cqe_poller) {
+        m_cqe_poller->notify_send_work();
     }
+    return rc;
 }
-*/
-
-
-
 
 
 

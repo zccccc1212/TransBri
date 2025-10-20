@@ -61,6 +61,8 @@ class pkt_rcvr_sink;
 #define ring_logfuncall		__log_info_funcall
 #define ring_logfine		__log_info_fine
 
+#define MR_SIZE 4294967296
+
 typedef enum {
 	CQT_RX,
 	CQT_TX
@@ -162,6 +164,7 @@ struct cm_con_data_t
 {
     uint64_t addr;        /* Buffer address */
     uint32_t rkey;        /* Remote key */
+    uint32_t remote_recv_window_rkey;  // recv window rkey
     uint32_t qp_num;      /* QP number */
     uint16_t lid;         /* LID of the IB port */
     uint8_t gid[16];      /* gid */
@@ -191,6 +194,8 @@ struct resources
 //  但是这个ringbuffer是封装好的，外面没办法访问里面的数据地址，只能直接操作进行拷贝数据
 // 仔细考虑过后，数据发送的接口也放到ringbuffer类中，一层层调用ringbuffer来进行实际的数据发送
 // 为了让我们得到cqe以后可以根据cqe中的wr_id找到对应的那一个request操作的数据的缓冲区的地址和长度，我们需要另外一个结构来存储这些信息，并在提交请求的时候将wr_id设为这个结构的地址，方便查询
+
+//采用imm以后不需要true_data_size_，删除
 class RingBuffer {
 private:
     std::vector<unsigned char> buffer_;
@@ -198,7 +203,6 @@ private:
     size_t head_;  // 读取位置
     size_t tail_;  // 写入位置
     size_t size_;  // 当前所占用的空间的大小
-    size_t true_data_size_; //真正存储了数据的大小
     int flag_; //0 for recv 1 for send
     
     // 读写锁 - 允许多个读或单个写
@@ -217,6 +221,9 @@ private:
     std::condition_variable m_recv_cv;
     std::atomic<uint64_t> m_data_arrival_count{0}; // 数据到达计数器
 
+    // 有效性标记
+    std::atomic<bool> is_valid_{true};
+
 public:
     // 禁用拷贝和移动构造
     RingBuffer(const RingBuffer&) = delete;
@@ -226,7 +233,7 @@ public:
 
     // 构造函数 - 指定容量
     explicit RingBuffer(size_t capacity, int flag) 
-        : capacity_(capacity), head_(0), tail_(0), size_(0), true_data_size_(0), flag_(flag) {
+        : capacity_(capacity), head_(0), tail_(0), size_(0), flag_(flag) {
         if (capacity == 0) {
             throw std::invalid_argument("Capacity must be greater than 0");
         }
@@ -235,7 +242,11 @@ public:
         atomic_available_.store(capacity);
     }
 
-    ~RingBuffer() = default;
+    ~RingBuffer() {
+        is_valid_.store(false, std::memory_order_release);
+        m_recv_cv.notify_all();
+        m_cv.notify_all();
+    }
 
     // RAII包装器，用于自动锁管理
     class ReadLock {
@@ -267,17 +278,15 @@ public:
     
     // 获取所占用的空间的大小 - 使用原子变量避免锁
     size_t size() const { return atomic_size_.load(std::memory_order_acquire); }
-    
 
-    size_t getHead() const {return head_;}
-
-    size_t getTail() const {return tail_;}
-
-
-    // 获取真正存储的数据量 - 需要读锁
-    size_t true_data_size() const { 
+    size_t getHead() const {
         std::shared_lock lock(rw_mutex_);
-        return true_data_size_; 
+        return head_;
+    }
+
+    size_t getTail() const {
+        std::shared_lock lock(rw_mutex_);
+        return tail_;
     }
 
     // 获取剩余空间 - 使用原子变量避免锁
@@ -289,16 +298,21 @@ public:
     // 检查是否已满 - 使用原子变量避免锁
     bool full() const { return atomic_available_.load(std::memory_order_acquire) == 0; }
 
+    // 检查缓冲区是否有效
+    bool is_valid() const { 
+        return is_valid_.load(std::memory_order_acquire); 
+    }
+
     // 等待足够的数据到达
-    bool wait_for_data(size_t required_true_data_size, int timeout_ms = 5000) {
+    bool wait_for_data(size_t required_size, int timeout_ms = 5000) {
         std::unique_lock<std::mutex> lock(m_recv_mutex);
         
-        auto predicate = [this, required_true_data_size]() {
-            return true_data_size_ >= required_true_data_size;
+        auto predicate = [this, required_size]() {
+            return !is_valid() || this->size() >= required_size;
         };
         
         // 如果条件已经满足，立即返回
-        if (predicate()) {
+        if (this->size() >= required_size) {
             return true;
         }
         
@@ -314,14 +328,14 @@ public:
                 uint64_t current_count = m_data_arrival_count.load(std::memory_order_acquire);
                 if (current_count > initial_count) {
                     // 有数据到达但不够，返回当前状态
-                    return true_data_size_ >= required_true_data_size;
+                    return this->size() >= required_size;
                 }
                 return false; // 真正超时，没有新数据
             }
-            return true;
+            return is_valid() && this->size() >= required_size;
         } else {
             m_recv_cv.wait(lock, predicate);
-            return true;
+            return is_valid() && this->size() >= required_size;
         }
     }
     
@@ -335,64 +349,55 @@ public:
     uint64_t get_data_arrival_count() const {
         return m_data_arrival_count.load(std::memory_order_acquire);
     }
-    
-    // 在add_true_data_size中通知数据到达
-    void add_true_data_size(size_t adddata) { 
-        std::unique_lock<std::shared_mutex> lock(rw_mutex_);
-        true_data_size_ += adddata; 
-        
-        // 通知数据到达
-        if (adddata > 0) {
-            // 注意：这里需要在锁外通知，避免死锁
-            lock.unlock();
-            notify_data_arrival();
-        }
-    }
 
     // 等待可用空间的函数
-    void wait_available(size_t required_size, int timeout_ms = 5000) {
+    bool wait_available(size_t required_size, int timeout_ms = 5000) {
         auto start_time = std::chrono::steady_clock::now();
         
-        while (atomic_available_.load(std::memory_order_acquire) < required_size) {
+        while (is_valid() && atomic_available_.load(std::memory_order_acquire) < required_size) {
             // 检查超时
             if (timeout_ms > 0) {
                 auto now = std::chrono::steady_clock::now();
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - start_time);
                 if (elapsed.count() >= timeout_ms) {
-                    throw std::runtime_error("Wait for available space timeout");
+                    return false;
                 }
             }
             
             // 短暂休眠避免忙等待
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            std::this_thread::sleep_for(std::chrono::microseconds(5));
         }
+        
+        return is_valid() && atomic_available_.load(std::memory_order_acquire) >= required_size;
     }
     
     // 带条件变量的等待（更高效）
-    void wait_available_cv(size_t required_size, int timeout_ms = 5000) {
+    bool wait_available_cv(size_t required_size, int timeout_ms = 5000) {
         std::unique_lock<std::mutex> lock(m_cv_mutex);
         
         auto predicate = [this, required_size]() {
-            return atomic_available_.load(std::memory_order_acquire) >= required_size;
+            return !is_valid() || atomic_available_.load(std::memory_order_acquire) >= required_size;
         };
         
         if (timeout_ms > 0) {
-            m_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), predicate);
+            auto result = m_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), predicate);
+            if (!result || !is_valid()) {
+                return false;
+            }
         } else {
             m_cv.wait(lock, predicate);
+            if (!is_valid()) {
+                return false;
+            }
         }
         
-        // 检查是否真的满足条件（可能因超时唤醒）
-        if (atomic_available_.load(std::memory_order_acquire) < required_size) {
-            throw std::runtime_error("Wait for available space timeout");
-        }
+        return atomic_available_.load(std::memory_order_acquire) >= required_size;
     }
 
-
-    // 写入数据 - 返回实际写入的字节数 flag = 1 for write data, flag = 0 for write len
-    size_t write(const void* data, size_t len, int flag) {
-        if (len == 0 || full()) return 0;
+    // 写入数据
+    size_t write(const void* data, size_t len) {
+        if (!is_valid() || data == nullptr || len == 0 || full()) return 0;
         
         std::unique_lock lock(rw_mutex_);
         
@@ -413,10 +418,6 @@ public:
             memcpy(&buffer_[0], src + to_write, len - to_write);
         }
         
-        if(flag){
-            true_data_size_ += len;
-        }
-        
         tail_ = (tail_ + len) % capacity_;
         size_ += len;
         
@@ -427,9 +428,21 @@ public:
         return len;
     }
 
+    // 安全的批量写入
+    size_t write_safe(const void* data, size_t len, int timeout_ms = 5000) {
+        if (!is_valid() || data == nullptr || len == 0) return 0;
+        
+        // 等待足够空间
+        if (!wait_available_cv(len, timeout_ms)) {
+            return 0;
+        }
+        
+        return write(data, len);
+    }
+
     // 读取数据但不移动读指针 - 返回实际读取的字节数
     size_t peek(void* data, size_t len) const {
-        if (len == 0 || empty()) return 0;
+        if (!is_valid() || data == nullptr || len == 0 || empty()) return 0;
         
         std::shared_lock lock(rw_mutex_);
         
@@ -452,8 +465,8 @@ public:
     }
 
     // 读取数据并移动读指针 - 返回实际读取的字节数, flag = 1 for read data, flag = 0 for read len
-    size_t read(void* data, size_t len, int flag) {
-        if (len == 0 || empty()) return 0;
+    size_t read(void* data, size_t len) {
+        if (!is_valid() || data == nullptr || len == 0 || empty()) return 0;
         
         std::unique_lock lock(rw_mutex_);
         
@@ -475,10 +488,6 @@ public:
         head_ = (head_ + len) % capacity_;
         size_ -= len;
         
-        if(flag){
-            true_data_size_ -= len;
-        }
-        
         // 更新原子变量
         atomic_size_.store(size_, std::memory_order_release);
         atomic_available_.store(capacity_ - size_, std::memory_order_release);
@@ -486,9 +495,21 @@ public:
         return len;
     }
 
+    // 安全的批量读取
+    size_t read_safe(void* data, size_t len, int timeout_ms = 5000) {
+        if (!is_valid() || data == nullptr || len == 0) return 0;
+        
+        // 等待足够数据
+        if (!wait_for_data(len, timeout_ms)) {
+            return 0;
+        }
+        
+        return read(data, len);
+    }
+
     // 丢弃数据 - 返回实际丢弃的字节数
     size_t discard(size_t len) {
-        if (len == 0 || empty()) return 0;
+        if (!is_valid() || len == 0 || empty()) return 0;
         
         std::unique_lock lock(rw_mutex_);
         
@@ -500,6 +521,9 @@ public:
         atomic_size_.store(size_, std::memory_order_release);
         atomic_available_.store(capacity_ - size_, std::memory_order_release);
         
+        // 通知等待空间的线程
+        m_cv.notify_all();
+        
         return len;
     }
 
@@ -508,47 +532,13 @@ public:
         std::unique_lock lock(rw_mutex_);
         head_ = tail_ = 0;
         size_ = 0;
-        true_data_size_ = 0;
         
         // 更新原子变量
         atomic_size_.store(0, std::memory_order_release);
         atomic_available_.store(capacity_, std::memory_order_release);
-    }
-
-    
-    /*
-     * 在head指针前写入4个字节的数据
-     * 前提条件：调用发生在数据读取后，不会覆盖已有数据，不会发生缓冲区溢出
-     * @param data 要写入的数据指针（必须至少4个字节）
-     * @return 总是返回4（固定写入4个字节）
-     */
-    size_t writeBeforeHead(const void* data) {
-        std::unique_lock lock(rw_mutex_);
-
-        const unsigned char* src = static_cast<const unsigned char*>(data);
-
-        // 计算新的head位置（向前移动4个位置）
-        size_t new_head = (head_ - 4 + capacity_) % capacity_;
-
-        // 写入4个字节到new_head位置
-        if (new_head + 4 <= capacity_) {
-            // 不需要回绕，连续写入
-            memcpy(&buffer_[new_head], src, 4);
-        } else {
-            // 需要回绕写入
-            size_t first_part = capacity_ - new_head;
-            memcpy(&buffer_[new_head], src, first_part);
-            memcpy(&buffer_[0], src + first_part, 4 - first_part);
-        }
-
-        // 更新head指针和缓冲区大小
-        head_ = new_head;
         
-        // 更新原子变量
-        atomic_size_.store(size_, std::memory_order_release);
-        atomic_available_.store(capacity_ - size_, std::memory_order_release);
-
-        return 4;
+        // 通知等待空间的线程
+        m_cv.notify_all();
     }
 
     // 获取连续可读空间的大小 - 需要读锁
@@ -588,23 +578,6 @@ public:
             return contiguous;
         }
     }
-/*
-    // 更新 head 指针（当外部直接读取了数据后调用）
-    void updateHead(size_t bytes_processed) {
-        std::unique_lock lock(rw_mutex_);
-        
-        head_ = (head_ + bytes_processed) % capacity_;
-        size_ -= bytes_processed;
-        
-        // 如果缓冲区为空，重置指针到起始位置以保持连续性
-        if (size_ == 0) {
-            head_ = tail_ = 0;
-        }
-        
-        // 更新原子变量
-        atomic_size_.store(size_, std::memory_order_release);
-        atomic_available_.store(capacity_ - size_, std::memory_order_release);
-    }*/
 
     // 更新head指针时（数据被消费后）更新available
     void updateHead(size_t bytes_processed) {
@@ -638,13 +611,16 @@ public:
         // 更新原子变量
         atomic_size_.store(size_, std::memory_order_release);
         atomic_available_.store(capacity_ - size_, std::memory_order_release);
+        
+        // 通知数据到达
+        notify_data_arrival();
     }
 
     // 打印状态（调试用）
     void printStats() const {
         std::shared_lock lock(rw_mutex_);
-        printf("RingBuffer Stats: Capacity=%zu, Size=%zu, Available=%zu, Head=%zu, Tail=%zu, TrueData=%zu\n",
-               capacity_, size_, capacity_ - size_, head_, tail_, true_data_size_);
+        printf("RingBuffer Stats: Capacity=%zu, Size=%zu, Available=%zu, Head=%zu, Tail=%zu\n",
+               capacity_, size_, capacity_ - size_, head_, tail_);
     }
 
     /**
@@ -690,13 +666,34 @@ public:
         return &buffer_[head_];
     }
 
-
-
     // 手动加锁方法（用于需要连续多个操作的情况）
     void lock_read() const { rw_mutex_.lock_shared(); }
     void unlock_read() const { rw_mutex_.unlock_shared(); }
     void lock_write() { rw_mutex_.lock(); }
     void unlock_write() { rw_mutex_.unlock(); }
+
+    // 获取可读区域
+    std::pair<const unsigned char*, size_t> get_readable_region() {
+        std::shared_lock lock(rw_mutex_);
+        if (empty()) {
+            return {nullptr, 0};
+        }
+        
+        size_t contiguous = (head_ <= tail_) ? (tail_ - head_) : (capacity_ - head_);
+        return {&buffer_[head_], std::min(contiguous, size_)};
+    }
+    
+    // 获取可写区域
+    std::pair<unsigned char*, size_t> get_writable_region() {
+        std::shared_lock lock(rw_mutex_);
+        if (full()) {
+            return {nullptr, 0};
+        }
+        
+        size_t available_space = capacity_ - size_;
+        size_t contiguous = (tail_ < head_) ? (head_ - tail_) : (capacity_ - tail_);
+        return {&buffer_[tail_], std::min(contiguous, available_space)};
+    }
 };
 
 
@@ -714,19 +711,35 @@ private:
     uint64_t cur_send_wr_id;
     uint64_t cur_recv_wr_id;
 
-	
+    uint64_t remote_recv_addr_start;        // remote Buffer address start 
+	uint64_t total_send;                    // total send data
+    uint64_t next_remote_to_write;          // next time post send to write remote
+    
+    size_t remote_recv_buffer;              // will be registered as MR and will update by remote and this side. TODO: may has some trouble but don't care now 
+    struct ibv_mr *remote_recv_window_mr;
+
+    size_t m_recv_buf;                      // will be regis as MR too
+    struct ibv_mr *my_recv_window_mr;
+
+
 	int m_qpn;
 	int m_recv_cqn;
 	int m_send_cqn;
+
 	long int send_buffer_total;
 	long int recv_buffer_total;
 	long int send_buffer_current;
 	long int recv_buffer_current;
-	
+	long int cur_recv_data;
+
 
 	union ibv_gid my_gid;
 	int m_gidindex;
     CQEPoller* m_cqe_poller;
+
+    std::mutex m_recv_mutex;
+    std::condition_variable m_recv_cv;
+    bool m_data_ready = false;  // 条件标志
 
 
 public:
@@ -752,17 +765,40 @@ public:
 	int modify_qp_to_rts();
 	int create_ringbuffer(size_t capacity);
 	
-    int post_send(__const void *__buf, size_t __nbytes);
-	int post_receive();
+    size_t get_send_buf(){ return m_send_rb->available(); }
+    size_t write_data_in_send_buf(__const void *__buf, size_t __nbytes);// 将数据写入send buf
 
-    
-    int post_send_with_imm(__const void *__buf, size_t __nbytes);
-    int post_receive_with_imm();
+    bool wait_send_buf(size_t __nbytes){return m_send_rb->wait_available_cv(__nbytes, 5000);}
 
+    size_t get_remote_recv_buf(){return this->remote_recv_buffer;}
+    bool wait_remote_recv_buf();
+    int update_my_remote_recv_window_notify();
+
+
+    int post_send_data_with_imm();
 
     size_t poll_send_completion();  // 专门轮询发送完成
-    int poll_recv_completion();  // 专门轮询接收完成
+    size_t poll_recv_completion();  // 专门轮询接收完成
 
+    int update_my_recv_window_add(uint32_t bytes_transed) {
+        std::lock_guard<std::mutex> lock(m_recv_mutex);
+        
+        m_recv_buf += bytes_transed;
+        return static_cast<int>(m_recv_buf);
+    }
+
+    int update_my_recv_window_reduce(uint32_t bytes_transed) {
+        std::lock_guard<std::mutex> lock(m_recv_mutex);
+        
+        m_recv_buf -= bytes_transed;
+        return static_cast<int>(m_recv_buf);
+    }
+
+    // 线程安全的查询
+    uint32_t get_recv_window() const {
+        std::lock_guard<std::mutex> lock(m_recv_mutex);
+        return m_recv_buf;
+    }
 
 
     // 启动轮询线程
@@ -1157,8 +1193,9 @@ private:
                 consecutive_idle_cycles = 0;
                 process_recv_completions(wc_array, recv_polled);
             }
-            
-            // 自适应睡眠策略
+//要不考虑不准睡眠呢，会是什么反应，重新测试一下到时候
+//TODO
+/*            // 自适应睡眠策略
             if (!had_work) {
                 consecutive_idle_cycles++;
                 
@@ -1182,7 +1219,7 @@ private:
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
             }
         }
-        
+        */
         // 线程退出前处理所有剩余的CQE
         drain_completion_queues();
         
@@ -1206,36 +1243,37 @@ private:
                 m_send_errors++;
                 continue;
             }
-            
-            rdma_op_data* tracker = (rdma_op_data*)wc_array[i].wr_id;
-            if (!tracker) {
-                fprintf(stderr, "Invalid tracker in send completion\n");
-                continue;
+
+            if(wc_array[i].opcode == IBV_WC_SEND){
+                //TODO 好像没什么要做的
+                printf("this send is to notify remote to update recv window\n");
+
             }
-            
-            void* data_addr = tracker->data_addr;
-            size_t data_size = tracker->data_size;
-            
-            printf("Send completed - Data addr: %p, Size: %zu , send buf head : %ld, tail : %ld \n", data_addr, data_size, m_connection->m_send_rb->getHead(), m_connection->m_send_rb->getTail());
-            
-            // 清理资源
-            if (g_rdma_pool) {
-                g_rdma_pool->deallocate(tracker);
+            else if(wc_array[i].opcode == IBV_WC_RDMA_WRITE){
+                rdma_op_data* tracker = (rdma_op_data*)wc_array[i].wr_id;
+                if (!tracker) {
+                    fprintf(stderr, "Invalid tracker in send completion\n");
+                    continue;
+                }
+                size_t data_size = tracker->data_size;
+                // 清理资源
+                if (g_rdma_pool) {
+                    g_rdma_pool->deallocate(tracker);
+                }
+                // 更新发送窗口
+                if (m_connection->m_send_rb) {
+                    m_connection->m_send_rb->updateHead(data_size);
+                }
             }
-            
-            // 更新发送窗口
-            if (m_connection->m_send_rb) {
-                m_connection->m_send_rb->updateHead(data_size);
+            else{
+                fprintf(stderr, "we don't expect to get a wc not send and write with imm \n");
             }
-            /*
-            if (m_connection->send_buffer_current >= data_size) {
-                m_connection->send_buffer_current -= data_size;
-            }*/
             
             m_send_completions++;
         }
     }
-    
+    // recv 是用来更新作为发送方remote的接收窗口的，因为发送方会维护一个对端的接收窗口
+    // recv with imm 是用来作为接收方接收数据的，更新作为接收方的接收窗口
     void process_recv_completions(struct ibv_wc* wc_array, int count) {
         for (int i = 0; i < count; i++) {
             if (wc_array[i].status != IBV_WC_SUCCESS) {
@@ -1243,31 +1281,20 @@ private:
                 m_recv_errors++;
                 continue;
             }
-            
-            //说实话没搞明白到底需不需要这个字节序转换，先放着
-
-            uint32_t this_seg_len_net;  // 网络字节序的长度
-            m_connection->m_recv_rb->peek(&this_seg_len_net, 4);
-
-            // 转换为主机字节序
-            uint32_t this_seg_len = ntohl(this_seg_len_net);
-
-            // 处理接收完成
-            if (m_connection->m_recv_rb) {
-                m_connection->m_recv_rb->add_true_data_size(this_seg_len_net);
+            if(wc_array[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM){
+                uint32_t imm_data = wc_array[i].imm;
+                uint32_t this_seg_len = ntohl(imm_data);
+                if (m_connection->m_send_rb) {m_connection->m_recv_rb->updateTail(this_seg_len);}
+                m_connection->update_my_recv_window_reduce(this_seg_len);
             }
-            
-            printf("recv complte . this seg len net : %d  this seg len : %d \n", this_seg_len_net, this_seg_len);
-
-            // 此时只是轮询到recv的 cqe，但是我们的RR本来就是满的，必须要应用程序确实读取数据以后才可以重新post recv，不然对端永远不知道接收缓冲区满没满，当RQ中没有RR了就说明接收缓冲区满了
-            //m_connection->post_receive();
-            
-            // 更新接收窗口
-            //if (m_connection->recv_buffer_current >= wc_array[i].byte_len) {
-            //    m_connection->recv_buffer_current -= wc_array[i].byte_len;
-            //}
-            
-            m_recv_completions++;
+            else if (wc_array[i].opcode == IBV_WC_RECV)
+            {
+                m_connection->update_my_remote_recv_window_notify();
+                printf("this send is to notify remote to update recv window\n");
+            }
+            else{
+                fprintf(stderr, "we don't expect to get a wc not recv and recv with imm \n");
+            }
         }
     }
     
@@ -1285,6 +1312,7 @@ private:
             process_recv_completions(&wc, 1);
         }
     }
+}
 };
 
 

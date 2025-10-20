@@ -3157,69 +3157,40 @@ ssize_t Sockfd_tcp::read(void *__buf, size_t __nbytes){
 
 
 ssize_t Sockfd_tcp::rx(void *__buf, size_t __nbytes, int __flags){
-	// 在poll之前和之后加打印时间的语句，看看时间消耗在哪里了
-    auto start_time = std::chrono::steady_clock::now();
-    
     size_t total_read = 0;
     size_t need_to_read;
     SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
     
     if (p_sor_conn == nullptr) {
-        //auto end_time = std::chrono::steady_clock::now();
-        //auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
-        printf("recv fallback to OS: %ld μs\n", duration.count());
         return orig_os_api.recv(m_fd, __buf, __nbytes, __flags);
     }
     
     // 检查当前数据量
-    size_t recved_sz = p_sor_conn->m_recv_rb->true_data_size();
+    size_t recved_sz = p_sor_conn->m_recv_rb->size();
     
-    //auto check_time = std::chrono::steady_clock::now();
-    //auto check_duration = std::chrono::duration_cast<std::chrono::microseconds>(check_time - start_time);
-    //printf("recv initial check: %ld μs, available data: %zu, requested: %zu\n", 
-    //       check_duration.count(), recved_sz, __nbytes);
     if (recved_sz > 0) {
         goto process_recv_data;
     } 
     else {
-        // 先尝试轮询一次，可能已经有数据到达但未处理
-        //auto poll_start = std::chrono::steady_clock::now();
         p_sor_conn->poll_recv_completion();
-        //auto poll_end = std::chrono::steady_clock::now();
-        //auto poll_duration = std::chrono::duration_cast<std::chrono::microseconds>(poll_end - poll_start);
-        //printf("recv poll completion: %ld μs\n", poll_duration.count());
-        
-        recved_sz = p_sor_conn->m_recv_rb->true_data_size();
+        recved_sz = p_sor_conn->m_recv_rb->size();
         if (recved_sz > 0) {
             goto process_recv_data;
         }
         else {
-            // 数据仍然不足，等待数据到达
-            //auto wait_start = std::chrono::steady_clock::now();
-            //printf("Waiting for data: have %zu, need %zu\n", recved_sz, __nbytes);
-            
             // 等待数据到达（带超时）
-            bool data_ready = p_sor_conn->m_recv_rb->wait_for_data(__nbytes, 5000); // 5秒超时
-            
-            //auto wait_end = std::chrono::steady_clock::now();
-            //auto wait_duration = std::chrono::duration_cast<std::chrono::microseconds>(wait_end - wait_start);
-            //printf("recv wait completed: %ld μs, data_ready: %s\n", wait_duration.count(), data_ready ? "true" : "false");
+            p_sor_conn->m_recv_rb->wait_for_data(1, 5000); // 5秒超时
             
             // 再次检查数据量
-            recved_sz = p_sor_conn->m_recv_rb->true_data_size();
-            //printf("After wait: available data: %zu\n", recved_sz);
+            recved_sz = p_sor_conn->m_recv_rb->size();
             if (recved_sz > 0) {
                 goto process_recv_data;
             }
             else {
-                // 等待超时或数据仍然不足，读取现有数据
+                // 等待超时或数据仍然不足，读取现有数据，应该是没数据
                 need_to_read = recved_sz;
                 if (need_to_read == 0) {
                     // 没有数据，根据是否阻塞设置错误码
-                    //auto end_time = std::chrono::steady_clock::now();
-                    //auto total_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
-                    //printf("recv total time: %ld μs, no data available\n", total_duration.count());
-                    
                     if (__flags & MSG_DONTWAIT) {
                         errno = EAGAIN;
                         return -1;
@@ -3227,6 +3198,9 @@ ssize_t Sockfd_tcp::rx(void *__buf, size_t __nbytes, int __flags){
                     // 对于阻塞socket，返回0表示连接关闭？
                     return 0;
                 }
+				else{
+					printf("may be some wrong , shouldn't hapen head\n");
+				}
             }
         }
     }
@@ -3234,38 +3208,20 @@ ssize_t Sockfd_tcp::rx(void *__buf, size_t __nbytes, int __flags){
 process_recv_data:
     // 处理完整的数据
 	need_to_read = __nbytes > recved_sz ? recved_sz : __nbytes;
-	size_t will_read = need_to_read;
-    //need_to_read = __nbytes;
-    size_t data_length;
     
-    //auto process_start = std::chrono::steady_clock::now();
-    while (total_read < will_read) {
-    //while (total_read < __nbytes) {
-        p_sor_conn->m_recv_rb->read(&data_length, 4, 0); // 读取数据段长度
-        
-        if (data_length > need_to_read) {
-            p_sor_conn->m_recv_rb->read(__buf, need_to_read, 1);
-            total_read += need_to_read;
-            
-            // 更新剩余数据长度
-            data_length -= need_to_read;
-            p_sor_conn->m_recv_rb->writeBeforeHead(&data_length);
-            break;
-        }
-        
-        p_sor_conn->m_recv_rb->read(__buf, data_length, 1);
-        total_read += data_length;
-        need_to_read -= data_length;
-        p_sor_conn->m_recv_rb->updateHead(RECV_SIZE - data_length - 4);
-        p_sor_conn->post_receive();
-    }
-    
-    //auto end_time = std::chrono::steady_clock::now();
-    //auto total_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
-    //auto process_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - process_start);
-    
-    //printf("recv total time: %ld μs, process time: %ld μs, returned: %zu bytes\n", 
-    
+	p_sor_conn->m_recv_rb->read(__buf, need_to_read);
+
+	total_read += need_to_read;
+
+	p_sor_conn->post_receive_for_recv_window();
+
+	if(p_sor_conn->get_recv_buf() == 0){
+		p_sor_conn->update_my_recv_window_add(total_read);
+		p_sor_conn->sync_remote_recv_window();
+	}
+	else{
+		p_sor_conn->update_my_recv_window_add(total_read);
+	}
     return total_read;
 }
 
@@ -3275,35 +3231,71 @@ process_recv_data:
 ssize_t Sockfd_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
     ssize_t return_sz = 0;
-
+	size_t remote_recv_buf;
     if (p_sor_conn) {
-        size_t total_send = 0;
+        size_t total_write = 0;
         
         try {
-            // 检查当前可用空间
-            size_t available = p_sor_conn->m_send_rb->available();
-            
+            // 检查当前可用空间send buf
+            size_t available = p_sor_conn->get_send_buf();
+
+			//这里的逻辑也要修改
+			//1. 判断发送缓冲区的available
+			//2. 够用就写入发送缓冲区
+			//3. 判断remote的接收缓冲区的窗口
+			//4. 看情况调用ibv_post_send 如果够调用，如果不够，应该直接返回，让轮询线程来更新remote recv buf
+			//5. 如果send buf和recv buf都不够，那么阻塞sockt就应该陷入阻塞，等对端来更新remote recv buf
+
             if (available >= __nbytes) {
-                // 有足够空间，直接发送
-                p_sor_conn->post_send_notify(__buf, __nbytes);
-                total_send = __nbytes;
+                // send buf有足够空间，写入数据
+				p_sor_conn->write_data_in_send_buf(__buf, __nbytes);
+                total_write += __nbytes;
             } else {
-                // 空间不足，等待直到有足够空间或超时
-                p_sor_conn->m_send_rb->wait_available_cv(__nbytes, 5000); // 5秒超时
-                
-                // 再次检查（虽然应该已经满足）
-                available = p_sor_conn->m_send_rb->available();
-                if (available >= __nbytes) {
-                    p_sor_conn->post_send_notify(__buf, __nbytes);
-                    total_send = __nbytes;
-                } else {
+				//send buf空间不足，不应该直接等待，而是先看接收缓冲区有没有可能已经更新了，如果更新了那么应该先发送一次数据
+				remote_recv_buf = p_sor_conn->get_remote_recv_buf();
+				if(remote_recv_buf > 0){
+					p_sor_conn->post_send_notify_with_imm();
+				}
+				//这里应该poll send cq更新发送缓冲区一次
+				p_sor_conn->wait_send_buf(__nbytes, 5000); // 5秒超 TODO ：时间太长了，考虑修改
+
+				available = p_sor_conn->get_send_buf();
+
+				if (available >= __nbytes) {
+					p_sor_conn->write_data_in_send_buf(__buf, __nbytes);
+					total_write += __nbytes;
+				}
+				else{
+					// 还是不够，就说明send buf也满，remote recv buf也满了，所以应该等对端更新remote recv buf
+					p_sor_conn->wait_remote_recv_buf();// 如果是阻塞的话，这个时间照理来说要非常长 TODO：
+					remote_recv_buf = p_sor_conn->get_remote_recv_buf();
+					if(remote_recv_buf > 0){
+						p_sor_conn->post_send_notify_with_imm();
+					}
+                	p_sor_conn->wait_send_buf(__nbytes, 5000); // 5秒超	 TODO ：时间太长了，考虑修改
+					available = p_sor_conn->get_send_buf();
+	
+                	if (available >= __nbytes) {
+                    	p_sor_conn->write_data_in_send_buf(__buf, __nbytes);
+						total_write += __nbytes;
+                	} else {
                     // 虽然等待了，但可能只获得了部分空间
-                    p_sor_conn->post_send_notify(__buf, available);
-                    total_send = available;
-                }
+                   		p_sor_conn->write_data_in_send_buf(__buf, available);
+						total_write += available;
+                	}
+				}
             }
-            
-            return_sz = total_send;
+            return_sz = total_write;
+
+			//write data end ,start to send data
+			remote_recv_buf = p_sor_conn->get_remote_recv_buf();
+			if(remote_recv_buf > 0){
+				p_sor_conn->post_send_notify_with_imm();
+			}
+			else{
+				//don't ibv_post_send and return 
+				return return_sz;
+			}
         } 
         catch (const std::exception& e) {
             fprintf(stderr, "Send failed: %s\n", e.what());
