@@ -42,7 +42,7 @@
 
 //zc add
 /* poll CQ timeout in millisec (2 seconds) */
-#define MAX_POLL_CQ_TIMEOUT 20000
+#define MAX_POLL_CQ_TIMEOUT 200000
 
 #define MSG_SIZE 64
 #define MR_SIZE 4294967296

@@ -1171,32 +1171,33 @@ private:
         setup_thread_properties();
         
         const int POLL_BATCH_SIZE = 32;
-        const int IDLE_SLEEP_US = 1000;
-        const int BUSY_POLL_THRESHOLD = 1000; // 忙碌轮询阈值
+//        const int IDLE_SLEEP_US = 1000;
+//        const int BUSY_POLL_THRESHOLD = 1000; // 忙碌轮询阈值
         
         struct ibv_wc wc_array[POLL_BATCH_SIZE];
-        int consecutive_idle_cycles = 0;
+//        int consecutive_idle_cycles = 0;
         
         while (!m_stop_flag) {
             m_poll_cycles++;
             
-            bool had_work = false;
+//            bool had_work = false;
             
             // 批量轮询发送CQ
             int send_polled = batch_poll_send_cq(wc_array, POLL_BATCH_SIZE);
             if (send_polled > 0) {
-                had_work = true;
-                consecutive_idle_cycles = 0;
+//                had_work = true;
+//                consecutive_idle_cycles = 0;
                 process_send_completions(wc_array, send_polled);
             }
             
             // 批量轮询接收CQ
-            int recv_polled = batch_poll_recv_cq(wc_array, POLL_BATCH_SIZE);
+/*            int recv_polled = batch_poll_recv_cq(wc_array, POLL_BATCH_SIZE);
             if (recv_polled > 0) {
                 had_work = true;
                 consecutive_idle_cycles = 0;
                 process_recv_completions(wc_array, recv_polled);
             }
+*/
 //要不考虑不准睡眠呢，会是什么反应，重新测试一下到时候
 //TODO
 /*            // 自适应睡眠策略
