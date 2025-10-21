@@ -589,11 +589,11 @@ public:
         // 更新原子变量
         atomic_size_.store(size_, std::memory_order_release);
         atomic_available_.store(capacity_ - size_, std::memory_order_release);
-
+/*
         // 如果缓冲区为空，重置指针
         if (size_ == 0) {
             head_ = tail_ = 0;
-        }
+        }*/
         
         // 通知等待的线程
         if (bytes_processed > 0) {
@@ -737,7 +737,7 @@ private:
 	int m_gidindex;
     CQEPoller* m_cqe_poller;
 
-    std::mutex m_recv_mutex;
+    mutable std::mutex m_recv_mutex;
     std::condition_variable m_recv_cv;
     bool m_data_ready = false;  // 条件标志
 
@@ -772,10 +772,14 @@ public:
 
     size_t get_remote_recv_buf(){return this->remote_recv_buffer;}
     bool wait_remote_recv_buf();
-    int update_my_remote_recv_window_notify();
+    void update_my_remote_recv_window_notify();
 
+    size_t sync_remote_recv_window();
+
+    int post_receive_for_recv_window();
 
     int post_send_data_with_imm();
+    int post_send_notify_with_imm();
 
     size_t poll_send_completion();  // 专门轮询发送完成
     size_t poll_recv_completion();  // 专门轮询接收完成
@@ -1218,8 +1222,10 @@ private:
                 // 有工作的时候减少睡眠，提高响应性
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
             }
+*/
+            std::this_thread::sleep_for(std::chrono::microseconds(10);
         }
-        */
+        
         // 线程退出前处理所有剩余的CQE
         drain_completion_queues();
         
@@ -1261,9 +1267,9 @@ private:
                     g_rdma_pool->deallocate(tracker);
                 }
                 // 更新发送窗口
-                if (m_connection->m_send_rb) {
+/*                if (m_connection->m_send_rb) {
                     m_connection->m_send_rb->updateHead(data_size);
-                }
+                }*/
             }
             else{
                 fprintf(stderr, "we don't expect to get a wc not send and write with imm \n");
@@ -1282,7 +1288,7 @@ private:
                 continue;
             }
             if(wc_array[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM){
-                uint32_t imm_data = wc_array[i].imm;
+                uint32_t imm_data = wc_array[i].imm_data;
                 uint32_t this_seg_len = ntohl(imm_data);
                 if (m_connection->m_send_rb) {m_connection->m_recv_rb->updateTail(this_seg_len);}
                 m_connection->update_my_recv_window_reduce(this_seg_len);
@@ -1312,7 +1318,6 @@ private:
             process_recv_completions(&wc, 1);
         }
     }
-}
 };
 
 

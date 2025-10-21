@@ -371,7 +371,7 @@ int SoR_connection::connect_to_peer(){
     remote_con_data.rkey = ntohl(tmp_con_data.rkey);
     remote_con_data.qp_num = ntohl(tmp_con_data.qp_num);
     remote_con_data.lid = ntohs(tmp_con_data.lid);
-    remote_con_data.recv_window_rkey = ntohs(tmp_con_data.recv_window_rkey);
+    remote_con_data.remote_recv_window_rkey = ntohl(tmp_con_data.remote_recv_window_rkey);
 
     memcpy(remote_con_data.gid, tmp_con_data.gid, 16);
 
@@ -386,6 +386,8 @@ int SoR_connection::connect_to_peer(){
     fprintf(stdout, " Remote rkey = 0x%x\n", remote_con_data.rkey);
     fprintf(stdout, " Remote QP number = 0x%x\n", remote_con_data.qp_num);
     fprintf(stdout, " Remote LID = 0x%x\n", remote_con_data.lid);
+    fprintf(stdout, " Remote recv window rkey = 0x%x\n", remote_con_data.remote_recv_window_rkey);
+
 
 	rc = modify_qp();
 	if(rc){
@@ -633,12 +635,15 @@ int SoR_connection::post_send_data_with_imm(){
     // 设置立即数 - 通常用于携带元数据，比如数据长度、操作类型等
     sr.imm_data = htonl(will_to_send); // 将数据长度作为立即数发送
     
+    sr.wr.rdma.remote_addr = remote_recv_addr_start  + (total_send % MR_SIZE); // 需要预先获取的远程内存地址
+    sr.wr.rdma.rkey = m_res.remote_props.rkey;        // 需要预先获取的远程rkey
+    
+    //TODO ????
+    m_send_rb->updateHead(will_to_send);
+
     total_send += will_to_send;
 
-    sr.wr.rdma.remote_addr = next_remote_to_write % MR_SIZE; // 需要预先获取的远程内存地址
-    sr.wr.rdma.rkey = m_res->remote_props.rkey;        // 需要预先获取的远程rkey
-    
-    next_remote_to_write += will_to_send;
+    //next_remote_to_write += will_to_send;
 
     // 执行RDMA WRITE操作 
     rc = ibv_post_send(m_res.qp, &sr, &bad_wr);
@@ -648,7 +653,7 @@ int SoR_connection::post_send_data_with_imm(){
     }
     else
     {
-        fprintf(stdout, "RDMA WRITE with immediate was posted, data length: %u\n", data_length);
+        fprintf(stdout, "RDMA WRITE with immediate was posted, will_to_send: %u\n", will_to_send);
     }
     return rc;
 }
@@ -704,7 +709,7 @@ bool SoR_connection::wait_remote_recv_buf() {
 }
 
 // 唤醒等待的函数
-int SoR_connection::update_my_remote_recv_window_notify(){
+void SoR_connection::update_my_remote_recv_window_notify(){
     {
         std::lock_guard<std::mutex> lock(m_recv_mutex);
         m_data_ready = true;
@@ -728,6 +733,7 @@ size_t SoR_connection::poll_send_completion() {
     unsigned long cur_time_msec;
     struct timeval cur_time;
     int poll_result;
+    size_t data_size = 0;
     //int rc = 0;
     
     gettimeofday(&cur_time, NULL);
@@ -752,17 +758,16 @@ size_t SoR_connection::poll_send_completion() {
             return -3;
         }
         
-        if(wc_array[i].opcode == IBV_WC_SEND){
+        if(wc.opcode == IBV_WC_SEND){
             //TODO 好像没什么要做的
             printf("this send is to notify remote to update recv window\n");
         }
-        else if(wc_array[i].opcode == IBV_WC_RDMA_WRITE){
-            rdma_op_data* tracker = (rdma_op_data*)wc_array[i].wr_id;
+        else if(wc.opcode == IBV_WC_RDMA_WRITE){
+            rdma_op_data* tracker = (rdma_op_data*)wc.wr_id;
             if (!tracker) {
                 fprintf(stderr, "Invalid tracker in send completion\n");
-                continue;
             }
-            size_t data_size = tracker->data_size;
+            data_size = tracker->data_size;
             // 清理资源
             if (g_rdma_pool) {
                 g_rdma_pool->deallocate(tracker);
@@ -808,7 +813,7 @@ size_t SoR_connection::poll_recv_completion() {
             return -3;
         }
         if(wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM){
-            uint32_t imm_data = wc.imm;
+            uint32_t imm_data = wc.imm_data;
             uint32_t this_seg_len = ntohl(imm_data);
             m_recv_rb->updateTail(this_seg_len);
             update_my_recv_window_reduce(this_seg_len);
@@ -848,7 +853,7 @@ void SoR_connection::stop_cqe_poller() {
         m_cqe_poller->stop();
     }
 }
-
+/*
 // 发送数据时通知轮询线程
 int SoR_connection::post_send_notify(__const void* data, size_t size) {
     int rc = post_send(data, size);  // 原来的post_send函数
@@ -856,7 +861,7 @@ int SoR_connection::post_send_notify(__const void* data, size_t size) {
         m_cqe_poller->notify_send_work();
     }
     return rc;
-}
+}*/
 
 int SoR_connection::post_send_notify_with_imm() {
     int rc = post_send_data_with_imm();  // 原来的post_send_data函数

@@ -127,9 +127,6 @@ private:
 	int	recv_buffer_current;
 
 
-
-
-
 };
 
 

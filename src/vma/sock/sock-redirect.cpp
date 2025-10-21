@@ -3102,7 +3102,7 @@ int Sockfd_tcp::accept(){
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
 	p_sor_conn->connect_to_peer();
 
-	p_sor_conn->post_receive();
+	//p_sor_conn->post_receive();
 
 
 	return m_fd;
@@ -3122,7 +3122,7 @@ int Sockfd_tcp::connect(){
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
 	p_sor_conn->connect_to_peer();
 
-	p_sor_conn->post_receive();
+	//p_sor_conn->post_receive();
 
 
 	return m_fd;
@@ -3215,7 +3215,7 @@ process_recv_data:
 
 	p_sor_conn->post_receive_for_recv_window();
 
-	if(p_sor_conn->get_recv_buf() == 0){
+	if(p_sor_conn->get_recv_window() == 0){
 		p_sor_conn->update_my_recv_window_add(total_read);
 		p_sor_conn->sync_remote_recv_window();
 	}
@@ -3257,7 +3257,7 @@ ssize_t Sockfd_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
 					p_sor_conn->post_send_notify_with_imm();
 				}
 				//这里应该poll send cq更新发送缓冲区一次
-				p_sor_conn->wait_send_buf(__nbytes, 5000); // 5秒超 TODO ：时间太长了，考虑修改
+				p_sor_conn->wait_send_buf(__nbytes); // 5秒超 TODO ：时间太长了，考虑修改
 
 				available = p_sor_conn->get_send_buf();
 
@@ -3272,7 +3272,7 @@ ssize_t Sockfd_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
 					if(remote_recv_buf > 0){
 						p_sor_conn->post_send_notify_with_imm();
 					}
-                	p_sor_conn->wait_send_buf(__nbytes, 5000); // 5秒超	 TODO ：时间太长了，考虑修改
+                	p_sor_conn->wait_send_buf(__nbytes); // 5秒超	 TODO ：时间太长了，考虑修改
 					available = p_sor_conn->get_send_buf();
 	
                 	if (available >= __nbytes) {
