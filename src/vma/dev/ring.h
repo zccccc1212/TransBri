@@ -388,6 +388,14 @@ public:
         return m_data_arrival_count.load(std::memory_order_acquire);
     }
 
+    unsigned char* get_buffer_start() {
+        return buffer_.data();
+    }
+
+    const unsigned char* get_buffer_start() const {
+        return buffer_.data();
+    }
+
 private:
     // 计算连续空间
     size_t calc_contiguous_size(size_t from, size_t to) const {
@@ -618,6 +626,14 @@ public:
         
         update_atomic_vars();
         m_cv.notify_all();
+    }
+
+    unsigned char* get_buffer_start() {
+        return buffer_.data();
+    }
+
+    const unsigned char* get_buffer_start() const {
+        return buffer_.data();
     }
 
 private:

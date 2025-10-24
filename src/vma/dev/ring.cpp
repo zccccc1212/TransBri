@@ -216,7 +216,7 @@ int SoR_connection::create_rdma_resources(){
     
     mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE ;
 
-    m_res.send_mr = ibv_reg_mr(m_res.pd, m_send_rb->getBufferStartAddress(), MR_SIZE, mr_flags);
+    m_res.send_mr = ibv_reg_mr(m_res.pd, m_send_rb->get_buffer_start(), MR_SIZE, mr_flags);
 	if(!m_res.send_mr)
     {
         fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
@@ -224,9 +224,9 @@ int SoR_connection::create_rdma_resources(){
         goto resources_create_exit;
     }
 	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-            m_send_rb->getBufferStartAddress(), m_res.send_mr->lkey, m_res.send_mr->rkey, mr_flags);
+            m_send_rb->get_buffer_start(), m_res.send_mr->lkey, m_res.send_mr->rkey, mr_flags);
 
-    m_res.recv_mr = ibv_reg_mr(m_res.pd, m_recv_rb->getBufferStartAddress(), MR_SIZE, mr_flags);
+    m_res.recv_mr = ibv_reg_mr(m_res.pd, m_recv_rb->get_buffer_start(), MR_SIZE, mr_flags);
     if(!m_res.recv_mr)
     {
         fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
@@ -234,7 +234,7 @@ int SoR_connection::create_rdma_resources(){
         goto resources_create_exit;
     }
 	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-            m_recv_rb->getBufferStartAddress(), m_res.recv_mr->lkey, m_res.recv_mr->rkey, mr_flags);
+            m_recv_rb->get_buffer_start(), m_res.recv_mr->lkey, m_res.recv_mr->rkey, mr_flags);
 
     //set the recv window as MR
     
@@ -349,7 +349,7 @@ int SoR_connection::connect_to_peer(){
     int rc;
 
 	//prepare local rdma data to trans 
-	local_con_data.addr = htonll((uintptr_t)m_recv_rb->getBufferStartAddress());
+	local_con_data.addr = htonll((uintptr_t)m_recv_rb->get_buffer_start());
     local_con_data.rkey = htonl(m_res.recv_mr->rkey);
     local_con_data.qp_num = htonl(m_res.qp->qp_num);
     local_con_data.lid = htons(m_res.port_attr.lid);
