@@ -3225,9 +3225,6 @@ process_recv_data:
     return total_read;
 }
 
-
-
-
 ssize_t Sockfd_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
     ssize_t return_sz = 0;
@@ -3272,7 +3269,7 @@ ssize_t Sockfd_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
 					if(remote_recv_buf > 0){
 						p_sor_conn->post_send_notify_with_imm();
 					}
-                	p_sor_conn->wait_send_buf(__nbytes); // 5秒超	 TODO ：时间太长了，考虑修改
+                	p_sor_conn->wait_send_buf(__nbytes); 
 					available = p_sor_conn->get_send_buf();
 	
                 	if (available >= __nbytes) {
@@ -3302,7 +3299,9 @@ ssize_t Sockfd_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
             return_sz = -1;
             errno = EAGAIN;  // 或者合适的错误码
         }
-    } else {
+    } 
+	else 
+	{
         // 回退到原始系统调用
         return_sz = orig_os_api.send(m_fd, __buf, __nbytes, __flags);
     }
