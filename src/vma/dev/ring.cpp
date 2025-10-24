@@ -213,7 +213,7 @@ int SoR_connection::create_rdma_resources(){
     
     mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE ;
 
-    m_res.send_mr = ibv_reg_mr(m_res.pd, m_send_rb->getBufferStartAddress(), MR_SIZE, mr_flags);
+    m_res.send_mr = ibv_reg_mr(m_res.pd, m_send_rb->get_buffer_start(), MR_SIZE, mr_flags);
 	if(!m_res.send_mr)
     {
         fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
@@ -221,9 +221,9 @@ int SoR_connection::create_rdma_resources(){
         goto resources_create_exit;
     }
 	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-            m_send_rb->getBufferStartAddress(), m_res.send_mr->lkey, m_res.send_mr->rkey, mr_flags);
+            m_send_rb->get_buffer_start(), m_res.send_mr->lkey, m_res.send_mr->rkey, mr_flags);
 
-    m_res.recv_mr = ibv_reg_mr(m_res.pd, m_recv_rb->getBufferStartAddress(), MR_SIZE, mr_flags);
+    m_res.recv_mr = ibv_reg_mr(m_res.pd, m_recv_rb->get_buffer_start(), MR_SIZE, mr_flags);
     if(!m_res.recv_mr)
     {
         fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
@@ -231,7 +231,7 @@ int SoR_connection::create_rdma_resources(){
         goto resources_create_exit;
     }
 	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-            m_recv_rb->getBufferStartAddress(), m_res.recv_mr->lkey, m_res.recv_mr->rkey, mr_flags);
+            m_recv_rb->get_buffer_start(), m_res.recv_mr->lkey, m_res.recv_mr->rkey, mr_flags);
 
     //set the recv window as MR
     
@@ -346,7 +346,7 @@ int SoR_connection::connect_to_peer(){
     int rc;
 
 	//prepare local rdma data to trans 
-	local_con_data.addr = htonll((uintptr_t)m_recv_rb->getBufferStartAddress());
+	local_con_data.addr = htonll((uintptr_t)m_recv_rb->get_buffer_start());
     local_con_data.rkey = htonl(m_res.recv_mr->rkey);
     local_con_data.qp_num = htonl(m_res.qp->qp_num);
     local_con_data.lid = htons(m_res.port_attr.lid);
@@ -604,14 +604,20 @@ int SoR_connection::post_send_data_with_imm(){
     struct ibv_sge sge;
     struct ibv_send_wr *bad_wr = NULL;
     int rc;
-    
+    size_t continues_size;
+
     size_t cur_data_size = m_send_rb->size();
     size_t remote_recv_buf = get_remote_recv_buf();
     uint32_t will_to_send = remote_recv_buf > cur_data_size ? cur_data_size : remote_recv_buf;
-    
+
     // prepare the scatter/gather entry 
     memset(&sge, 0, sizeof(sge));
-    sge.addr = (uintptr_t)m_send_rb->getHeadAddress();
+    sge.addr = (uintptr_t)m_send_rb->get_unack_region(continues_size);
+    if(continues_size < will_to_send){
+
+    }
+
+    m_send_rb->mark_sent(will_to_send);
     sge.length = will_to_send;
     sge.lkey = m_res.send_mr->lkey;
 
@@ -634,9 +640,6 @@ int SoR_connection::post_send_data_with_imm(){
     
     sr.wr.rdma.remote_addr = remote_recv_addr_start  + (total_send % MR_SIZE); // 需要预先获取的远程内存地址
     sr.wr.rdma.rkey = m_res.remote_props.rkey;        // 需要预先获取的远程rkey
-    
-    //TODO ????
-    m_send_rb->updateHead(will_to_send);
 
     total_send += will_to_send;
 
@@ -722,64 +725,6 @@ void SoR_connection::update_my_remote_recv_window_notify(){
 //而且这个recv也会非常方便，每次post recv的大小和起始地址都是一样的其实
 //然后轮循到cqe以后根据cqe的类型，就可以知道是数据来了，还是控制流消息（更新窗口大小）来了，容易区分
 
-
-//主动轮询发送cq
-size_t SoR_connection::poll_send_completion() {
-    struct ibv_wc wc;
-    unsigned long start_time_msec;
-    unsigned long cur_time_msec;
-    struct timeval cur_time;
-    int poll_result;
-    size_t data_size = 0;
-    //int rc = 0;
-    
-    gettimeofday(&cur_time, NULL);
-    start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
-    
-    do {
-        // 关键：只轮询发送CQ
-        poll_result = ibv_poll_cq(m_res.send_cq, 1, &wc);
-        gettimeofday(&cur_time, NULL);
-        cur_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
-    } while ((poll_result == 0) && ((cur_time_msec - start_time_msec) < MAX_POLL_CQ_TIMEOUT));
-    
-    if (poll_result < 0) {
-        fprintf(stderr, "poll send CQ failed\n");
-        return -1;
-    } else if (poll_result == 0) {
-        fprintf(stderr, "send completion not found after timeout\n");
-        return -2;
-    } else {
-        if (wc.status != IBV_WC_SUCCESS) {
-            fprintf(stderr, "send failed with status: 0x%x\n", wc.status);
-            return -3;
-        }
-        
-        if(wc.opcode == IBV_WC_SEND){
-            //TODO 好像没什么要做的
-            printf("this send is to notify remote to update recv window\n");
-        }
-        else if(wc.opcode == IBV_WC_RDMA_WRITE){
-            rdma_op_data* tracker = (rdma_op_data*)wc.wr_id;
-            if (!tracker) {
-                fprintf(stderr, "Invalid tracker in send completion\n");
-            }
-            data_size = tracker->data_size;
-            // 清理资源
-            if (g_rdma_pool) {
-                g_rdma_pool->deallocate(tracker);
-            }
-            // 更新发送窗口
-            m_send_rb->updateHead(data_size);
-        }
-        else{
-            fprintf(stderr, "we don't expect to get a wc not send and write with imm \n");
-        }
-
-        return data_size;  // 成功
-    }
-}
-
 size_t SoR_connection::poll_recv_completion() {
     struct ibv_wc wc;
     unsigned long start_time_msec;
@@ -829,8 +774,8 @@ size_t SoR_connection::poll_recv_completion() {
 }
 
 int SoR_connection::create_ringbuffer(size_t capacity){
-    RingBuffer * sendbuf = new RingBuffer(capacity, 1);
-    RingBuffer * recvbuf = new RingBuffer(capacity, 0);
+    RingBuffer * sendbuf = new SendBuffer(capacity);
+    RingBuffer * recvbuf = new RecvBuffer(capacity);
     m_send_rb = sendbuf;
     m_recv_rb = recvbuf;
     return 0;
@@ -850,15 +795,6 @@ void SoR_connection::stop_cqe_poller() {
         m_cqe_poller->stop();
     }
 }
-/*
-// 发送数据时通知轮询线程
-int SoR_connection::post_send_notify(__const void* data, size_t size) {
-    int rc = post_send(data, size);  // 原来的post_send函数
-    if (rc == 0 && m_cqe_poller) {
-        m_cqe_poller->notify_send_work();
-    }
-    return rc;
-}*/
 
 int SoR_connection::post_send_notify_with_imm() {
     int rc = post_send_data_with_imm();  // 原来的post_send_data函数
