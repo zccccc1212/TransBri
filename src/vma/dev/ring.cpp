@@ -44,10 +44,7 @@
 /* poll CQ timeout in millisec (2 seconds) */
 #define MAX_POLL_CQ_TIMEOUT 200000
 
-#define MSG_SIZE 64
 #define MR_SIZE 4294967296
-
-#define RECV_SIZE	1048576  //rdma recv 操作的大小，可能设置成MTU好一点
 
 #define RECV_WINDOW_SIZE    4095
 #define CQE_SIZE     4095    //cqe size
