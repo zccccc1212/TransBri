@@ -3166,14 +3166,14 @@ ssize_t Sockfd_tcp::rx(void *__buf, size_t __nbytes, int __flags){
     }
     
     // 检查当前数据量
-    size_t recved_sz = p_sor_conn->m_recv_rb->size();
+    size_t recved_sz = p_sor_conn->m_recv_rb->total_size();
     
     if (recved_sz > 0) {
         goto process_recv_data;
     } 
     else {
         p_sor_conn->poll_recv_completion();
-        recved_sz = p_sor_conn->m_recv_rb->size();
+        recved_sz = p_sor_conn->m_recv_rb->total_size();
         if (recved_sz > 0) {
             goto process_recv_data;
         }
@@ -3182,7 +3182,7 @@ ssize_t Sockfd_tcp::rx(void *__buf, size_t __nbytes, int __flags){
             p_sor_conn->m_recv_rb->wait_for_data(1, 5000); // 5秒超时
             
             // 再次检查数据量
-            recved_sz = p_sor_conn->m_recv_rb->size();
+            recved_sz = p_sor_conn->m_recv_rb->total_size();
             if (recved_sz > 0) {
                 goto process_recv_data;
             }
@@ -3254,7 +3254,7 @@ ssize_t Sockfd_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
 					p_sor_conn->post_send_notify_with_imm();
 				}
 				//这里应该poll send cq更新发送缓冲区一次
-				p_sor_conn->wait_send_buf(__nbytes); // 5秒超 TODO ：时间太长了，考虑修改
+				p_sor_conn->wait_send_buf(1); // 
 
 				available = p_sor_conn->get_send_buf();
 

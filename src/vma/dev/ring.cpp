@@ -605,19 +605,23 @@ int SoR_connection::post_send_data_with_imm(){
     struct ibv_send_wr *bad_wr = NULL;
     int rc;
     size_t continues_size;
+    int flag = 0;
 
-    size_t cur_data_size = m_send_rb->size();
+    size_t cur_data_size = m_send_rb->unsent_size();
     size_t remote_recv_buf = get_remote_recv_buf();
     uint32_t will_to_send = remote_recv_buf > cur_data_size ? cur_data_size : remote_recv_buf;
 
     // prepare the scatter/gather entry 
     memset(&sge, 0, sizeof(sge));
-    sge.addr = (uintptr_t)m_send_rb->get_unack_region(continues_size);
+    sge.addr = (uintptr_t)m_send_rb->get_unsent_region(continues_size);
     if(continues_size < will_to_send){
-
+        flag = 1;
+        will_to_send = continues_size;
     }
 
+
     m_send_rb->mark_sent(will_to_send);
+
     sge.length = will_to_send;
     sge.lkey = m_res.send_mr->lkey;
 
@@ -643,8 +647,6 @@ int SoR_connection::post_send_data_with_imm(){
 
     total_send += will_to_send;
 
-    //next_remote_to_write += will_to_send;
-
     // 执行RDMA WRITE操作 
     rc = ibv_post_send(m_res.qp, &sr, &bad_wr);
     if(rc)
@@ -654,6 +656,10 @@ int SoR_connection::post_send_data_with_imm(){
     else
     {
         fprintf(stdout, "RDMA WRITE with immediate was posted, will_to_send: %u\n", will_to_send);
+    }
+
+    if(flag){// 说明数据到这里其实分段了，所以我们要分两次调用ibv_post_send,分两次发送具体的数据
+        post_send_data_with_imm();
     }
     return rc;
 }
@@ -774,8 +780,8 @@ size_t SoR_connection::poll_recv_completion() {
 }
 
 int SoR_connection::create_ringbuffer(size_t capacity){
-    RingBuffer * sendbuf = new SendBuffer(capacity);
-    RingBuffer * recvbuf = new RecvBuffer(capacity);
+    SendBuffer * sendbuf = new SendBuffer(capacity);
+    RecvBuffer * recvbuf = new RecvBuffer(capacity);
     m_send_rb = sendbuf;
     m_recv_rb = recvbuf;
     return 0;

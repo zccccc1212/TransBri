@@ -355,7 +355,7 @@ public:
     }
 
     // 更新tail指针（当外部直接写入了数据后调用）
-    void update_tail(size_t bytes_added) {
+    void updateTail(size_t bytes_added) {
         std::unique_lock lock(rw_mutex_);
         
         if (bytes_added == 0 || bytes_added > available_size_) {
@@ -490,7 +490,7 @@ public:
         const unsigned char* src = static_cast<const unsigned char*>(data);
         
         // 计算连续可写入空间
-        size_t contiguous = calc_contiguous_size(tail_, head_);
+        size_t contiguous = calc_contiguous_write_size(tail_, head_);
         size_t to_write = std::min(len, contiguous);
         
         // 写入第一部分
@@ -646,6 +646,23 @@ private:
         }
     }
 
+    size_t calc_contiguous_write_size() const {
+        if (full()) return 0;
+        
+        // 如果缓冲区为空，整个缓冲区都是连续可写的
+        if (empty()) return capacity_;
+        
+        // 如果 tail 在 head 之前，连续空间到缓冲区末尾
+        if (tail_ < head_) {
+            return head_ - tail_;
+        }
+        // 如果 tail 在 head 之后，连续空间到缓冲区末尾
+        else {
+            return capacity_ - tail_;
+        }
+    }
+
+
     // 更新原子变量
     void update_atomic_vars() {
         atomic_total_size_.store(total_size_, std::memory_order_release);
@@ -703,8 +720,8 @@ public:
 
     struct resources m_res;
 
-    RingBuffer * m_send_rb;
-	RingBuffer * m_recv_rb;
+    SendBuffer * m_send_rb;
+	RecvBuffer * m_recv_rb;
 
 	SoR_connection(int fd);
 	~SoR_connection();	
