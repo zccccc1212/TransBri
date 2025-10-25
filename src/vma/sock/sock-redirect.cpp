@@ -3264,7 +3264,7 @@ ssize_t Sockfd_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
 				}
 				else{
 					// 还是不够，就说明send buf也满，remote recv buf也满了，所以应该等对端更新remote recv buf
-					p_sor_conn->wait_remote_recv_buf();// 如果是阻塞的话，这个时间照理来说要非常长 TODO：
+					p_sor_conn->wait_remote_recv_buf();// 如果是阻塞的话，这个时间照理来说要非常长 轮询线程必须启动，或者说wait期间也让他去轮询
 					remote_recv_buf = p_sor_conn->get_remote_recv_buf();
 					if(remote_recv_buf > 0){
 						p_sor_conn->post_send_notify_with_imm();

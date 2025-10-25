@@ -399,7 +399,11 @@ public:
 private:
     // 计算连续空间
     size_t calc_contiguous_size(size_t from, size_t to) const {
-        if (from <= to) {
+        if(full())    return capacity_;
+
+        if(empty()) return 0;
+
+        if (from < to) {
             return to - from;
         } else {
             return capacity_ - from;
@@ -589,7 +593,7 @@ public:
             size = 0;
             return nullptr;
         }
-        size_t contiguous = calc_contiguous_size(tail_, head_);
+        size_t contiguous = calc_contiguous_write_size(tail_, head_);
         size = std::min(contiguous, available_size_);
         return &buffer_[tail_];
     }
@@ -974,7 +978,7 @@ public:
     }
 };
 
-
+extern std::recursive_mutex g_cq_poll_mutex;
 
 class CQEPoller {
 private:
@@ -1164,13 +1168,13 @@ private:
             }
             
             // 批量轮询接收CQ
-/*            int recv_polled = batch_poll_recv_cq(wc_array, POLL_BATCH_SIZE);
+            int recv_polled = batch_poll_recv_cq(wc_array, POLL_BATCH_SIZE);
             if (recv_polled > 0) {
-                had_work = true;
-                consecutive_idle_cycles = 0;
+                //had_work = true;
+                //consecutive_idle_cycles = 0;
                 process_recv_completions(wc_array, recv_polled);
             }
-*/
+
 //要不考虑不准睡眠呢，会是什么反应，重新测试一下到时候
 //TODO
 /*            // 自适应睡眠策略
@@ -1213,6 +1217,10 @@ private:
     }
     
     int batch_poll_recv_cq(struct ibv_wc* wc_array, int max_count) {
+        std::unique_lock<std::recursive_mutex> lock(g_cq_poll_mutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            return 0; // 锁被占用，跳过本次轮询
+        }
         return ibv_poll_cq(m_connection->m_res.recv_cq, max_count, wc_array);
     }
     

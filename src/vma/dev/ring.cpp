@@ -731,6 +731,10 @@ void SoR_connection::update_my_remote_recv_window_notify(){
 //而且这个recv也会非常方便，每次post recv的大小和起始地址都是一样的其实
 //然后轮循到cqe以后根据cqe的类型，就可以知道是数据来了，还是控制流消息（更新窗口大小）来了，容易区分
 
+// 非阻塞版本
+
+std::recursive_mutex g_cq_poll_mutex;
+
 size_t SoR_connection::poll_recv_completion() {
     struct ibv_wc wc;
     unsigned long start_time_msec;
@@ -744,7 +748,13 @@ size_t SoR_connection::poll_recv_completion() {
     
     do {
         // 关键：只轮询接收CQ
-        poll_result = ibv_poll_cq(m_res.recv_cq, 1, &wc);
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_cq_poll_mutex);
+            if (!lock.owns_lock()) {
+                return 0; // 锁被占用，直接返回
+            }
+            poll_result = ibv_poll_cq(m_res.recv_cq, 1, &wc);
+        }
         gettimeofday(&cur_time, NULL);
         cur_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
     } while ((poll_result == 0) && ((cur_time_msec - start_time_msec) < MAX_POLL_CQ_TIMEOUT));
