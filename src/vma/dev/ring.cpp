@@ -44,8 +44,6 @@
 /* poll CQ timeout in millisec (2 seconds) */
 #define MAX_POLL_CQ_TIMEOUT 200000
 
-#define MR_SIZE 4294967296
-
 #define RECV_WINDOW_SIZE    4095
 #define CQE_SIZE     4095    //cqe size
 
@@ -733,7 +731,7 @@ void SoR_connection::update_my_remote_recv_window_notify(){
 
 // 非阻塞版本
 
-std::recursive_mutex g_cq_poll_mutex;
+std::mutex g_cq_poll_mutex;
 
 size_t SoR_connection::poll_recv_completion() {
     struct ibv_wc wc;
@@ -749,7 +747,7 @@ size_t SoR_connection::poll_recv_completion() {
     do {
         // 关键：只轮询接收CQ
         {
-            std::lock_guard<std::recursive_mutex> lock(g_cq_poll_mutex);
+            std::unique_lock<std::mutex> lock(g_cq_poll_mutex, std::try_to_lock);
             if (!lock.owns_lock()) {
                 return 0; // 锁被占用，直接返回
             }

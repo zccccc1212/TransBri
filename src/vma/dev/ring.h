@@ -494,7 +494,7 @@ public:
         const unsigned char* src = static_cast<const unsigned char*>(data);
         
         // 计算连续可写入空间
-        size_t contiguous = calc_contiguous_write_size(tail_, head_);
+        size_t contiguous = calc_contiguous_write_size();
         size_t to_write = std::min(len, contiguous);
         
         // 写入第一部分
@@ -593,7 +593,7 @@ public:
             size = 0;
             return nullptr;
         }
-        size_t contiguous = calc_contiguous_write_size(tail_, head_);
+        size_t contiguous = calc_contiguous_write_size();
         size = std::min(contiguous, available_size_);
         return &buffer_[tail_];
     }
@@ -978,7 +978,7 @@ public:
     }
 };
 
-extern std::recursive_mutex g_cq_poll_mutex;
+extern std::mutex g_cq_poll_mutex;
 
 class CQEPoller {
 private:
@@ -1217,7 +1217,7 @@ private:
     }
     
     int batch_poll_recv_cq(struct ibv_wc* wc_array, int max_count) {
-        std::unique_lock<std::recursive_mutex> lock(g_cq_poll_mutex, std::try_to_lock);
+        std::unique_lock<std::mutex> lock(g_cq_poll_mutex, std::try_to_lock);
         if (!lock.owns_lock()) {
             return 0; // 锁被占用，跳过本次轮询
         }
