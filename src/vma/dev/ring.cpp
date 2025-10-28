@@ -75,8 +75,14 @@ void ring::print_val()
 
 
 // zc add
-SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/){
-	m_fd = fd;
+SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/)
+    : m_fd(fd)
+    , outstanding_send_requests(0)
+    , max_outstanding_sends(8000)  // 默认值，可以根据需要调整
+    , send_queue_shutdown(false)
+    , cur_send_wr_id(0);
+    , cur_recv_wr_id(0);
+{
 	m_gidindex = 4;// 144 : 4  ; 155 : 2;
     m_send_rb = nullptr;
     m_recv_rb = nullptr;
@@ -257,8 +263,8 @@ int SoR_connection::create_rdma_resources(){
     qp_init_attr.sq_sig_all = 1;
     qp_init_attr.send_cq = m_res.send_cq;
     qp_init_attr.recv_cq = m_res.recv_cq;
-    qp_init_attr.cap.max_send_wr = 1+RECV_WINDOW_SIZE;//TODO : set the approperiate wr number
-    qp_init_attr.cap.max_recv_wr = 1+RECV_WINDOW_SIZE;
+    qp_init_attr.cap.max_send_wr = 1+2*RECV_WINDOW_SIZE;//TODO : set the approperiate wr number
+    qp_init_attr.cap.max_recv_wr = 1+2*RECV_WINDOW_SIZE;
     qp_init_attr.cap.max_send_sge = 2;
     qp_init_attr.cap.max_recv_sge = 2;
     m_res.qp = ibv_create_qp(m_res.pd, &qp_init_attr);
@@ -817,6 +823,7 @@ int SoR_connection::post_send_notify_with_imm() {
     }
     return rc;
 }
+
 
 
 

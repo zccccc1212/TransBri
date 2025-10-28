@@ -430,7 +430,7 @@ private:
     size_t head_;  // 已确认数据的开始位置
     size_t mid_;   // 已发送但未确认数据的开始位置（未发送数据的开始位置）
     size_t tail_;  // 未发送数据的结束位置
-    
+
     // 大小统计
     size_t total_size_;      // 总数据大小
     size_t unack_size_;      // 已发送但未确认的数据大小
@@ -718,6 +718,14 @@ private:
     std::condition_variable m_recv_cv;
     bool m_data_ready = false;  // 条件标志
 
+    struct ibv_device_attr m_device_attr;
+
+
+    std::atomic<uint32_t> outstanding_send_requests;  // 当前未完成的发送请求数量
+    uint32_t max_outstanding_sends;                   // 最大允许的未完成发送请求数
+    mutable std::mutex send_queue_mutex;              // 发送队列互斥锁
+    std::condition_variable send_queue_cv;            // 发送队列条件变量
+    bool send_queue_shutdown;                         // 关闭标志
 
 public:
 
@@ -781,6 +789,13 @@ public:
         return m_recv_buf;
     }
 
+        // 发送队列限制相关函数
+    void set_max_outstanding_sends(uint32_t max_sends);
+    uint32_t get_outstanding_send_count() const;
+    uint32_t get_max_outstanding_sends() const;
+    bool wait_for_send_slot(int timeout_ms = -1);
+    void notify_send_completion();
+    void shutdown_send_queue();
 
     // 启动轮询线程
     void start_cqe_poller();
@@ -1147,7 +1162,7 @@ private:
         // 在线程开始运行时设置属性（确保在正确的线程上下文中）
         setup_thread_properties();
         
-        const int POLL_BATCH_SIZE = 32;
+        const int POLL_BATCH_SIZE = 3200;
 //        const int IDLE_SLEEP_US = 1000;
 //        const int BUSY_POLL_THRESHOLD = 1000; // 忙碌轮询阈值
         
@@ -1201,7 +1216,7 @@ private:
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
             }
 */
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
+            std::this_thread::sleep_for(std::chrono::microseconds(1));
         }
         
         // 线程退出前处理所有剩余的CQE
