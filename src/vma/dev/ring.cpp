@@ -44,8 +44,8 @@
 /* poll CQ timeout in millisec (2 seconds) */
 #define MAX_POLL_CQ_TIMEOUT 200000
 
-#define RECV_WINDOW_SIZE    4095
-#define CQE_SIZE     4095    //cqe size
+#define RECV_WINDOW_SIZE    8000
+#define CQE_SIZE     8000    //cqe size
 
 
 
@@ -77,18 +77,15 @@ void ring::print_val()
 // zc add
 SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/)
     : m_fd(fd)
+    , cur_send_wr_id(0)
+    , cur_recv_wr_id(0)
     , outstanding_send_requests(0)
     , max_outstanding_sends(8000)  // 默认值，可以根据需要调整
     , send_queue_shutdown(false)
-    , cur_send_wr_id(0);
-    , cur_recv_wr_id(0);
 {
 	m_gidindex = 4;// 144 : 4  ; 155 : 2;
     m_send_rb = nullptr;
     m_recv_rb = nullptr;
-
-    cur_send_wr_id = 0;
-    cur_recv_wr_id = 0;
 
 
     send_buffer_total = MR_SIZE;
@@ -263,8 +260,8 @@ int SoR_connection::create_rdma_resources(){
     qp_init_attr.sq_sig_all = 1;
     qp_init_attr.send_cq = m_res.send_cq;
     qp_init_attr.recv_cq = m_res.recv_cq;
-    qp_init_attr.cap.max_send_wr = 1+2*RECV_WINDOW_SIZE;//TODO : set the approperiate wr number
-    qp_init_attr.cap.max_recv_wr = 1+2*RECV_WINDOW_SIZE;
+    qp_init_attr.cap.max_send_wr = RECV_WINDOW_SIZE;//TODO : set the approperiate wr number
+    qp_init_attr.cap.max_recv_wr = RECV_WINDOW_SIZE;
     qp_init_attr.cap.max_send_sge = 2;
     qp_init_attr.cap.max_recv_sge = 2;
     m_res.qp = ibv_create_qp(m_res.pd, &qp_init_attr);
@@ -655,11 +652,12 @@ int SoR_connection::post_send_data_with_imm(){
     rc = ibv_post_send(m_res.qp, &sr, &bad_wr);
     if(rc)
     {
-        fprintf(stderr, "failed to post RDMA WRITE with immediate\n");
+        fprintf(stderr, "failed to post RDMA WRITE with immediate.  cur_send_wr_id : %ld , total_send : %ld flag : %d\n", cur_send_wr_id, total_send, flag);
     }
     else
     {
-        fprintf(stdout, "RDMA WRITE with immediate was posted, will_to_send: %u\n", will_to_send);
+        //fprintf(stdout, "RDMA WRITE with immediate was posted, will_to_send: %u\n", will_to_send);
+        remote_recv_buffer -= will_to_send;
     }
 
     if(flag){// 说明数据到这里其实分段了，所以我们要分两次调用ibv_post_send,分两次发送具体的数据
@@ -692,7 +690,7 @@ size_t SoR_connection::sync_remote_recv_window(){
     rc = ibv_post_send(m_res.qp, &sr, &bad_wr);
     if(rc)
     {
-        fprintf(stderr, "failed to post RDMA SEND\n");
+        fprintf(stderr, "failed to post RDMA SEND to sync remote recv window \n");
     }
     else
     {

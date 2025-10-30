@@ -868,6 +868,10 @@ public:
     // 发送数据时通知轮询线程
     int post_send_notify(__const void* data, size_t size);
 
+    void print_stats_for_debug(){
+        printf("cur_send_wr_id : %ld, total_send : %ld\n", cur_send_wr_id, total_send);
+    }
+
     // 获取统计信息
     //void get_poller_stats(uint64_t& send_completions, uint64_t& recv_completions,
     //                     uint64_t& send_errors, uint64_t& recv_errors);
@@ -1278,7 +1282,8 @@ private:
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
             }
 */
-            std::this_thread::sleep_for(std::chrono::microseconds(1));
+            //std::this_thread::sleep_for(std::chrono::microseconds(1));
+            std::this_thread::yield();
         }
         
         // 线程退出前处理所有剩余的CQE
@@ -1304,9 +1309,12 @@ private:
     void process_send_completions(struct ibv_wc* wc_array, int count) {
         for (int i = 0; i < count; i++) {
             if (wc_array[i].status != IBV_WC_SUCCESS) {
-                fprintf(stderr, "Send completion error: 0x%x\n", wc_array[i].status);
+                fprintf(stderr, "Failed status %s (%d)\n", ibv_wc_status_str(wc_array[i].status), // 这个函数可以直接将状态码转为字符串
+                wc_array[i].status);
+                debug_print_send_completions();
                 m_send_errors++;
-                continue;
+                std::terminate();
+                //continue;
             }
 
             if(wc_array[i].opcode == IBV_WC_SEND){
@@ -1376,6 +1384,15 @@ private:
         while ((poll_result = ibv_poll_cq(m_connection->m_res.recv_cq, 1, &wc)) > 0) {
             process_recv_completions(&wc, 1);
         }
+    }
+
+    void debug_print_send_completions() const {
+        uint64_t send_completions = m_send_completions.load();
+        uint64_t send_errors = m_send_errors.load();
+        uint64_t poll_cycles = m_poll_cycles.load();
+        
+        printf("[CQEPoller DEBUG] Send Completions: %lu, Send Errors: %lu, Poll Cycles: %lu\n",
+               send_completions, send_errors, poll_cycles);
     }
 };
 
