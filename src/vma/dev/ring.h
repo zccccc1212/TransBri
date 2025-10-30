@@ -427,15 +427,20 @@ class SendBuffer {
 private:
     std::vector<unsigned char> buffer_;
     size_t capacity_;
-    size_t head_;  // 已确认数据的开始位置
-    size_t mid_;   // 已发送但未确认数据的开始位置（未发送数据的开始位置）
-    size_t tail_;  // 未发送数据的结束位置
-
-    // 大小统计
+    
+    // 指针管理
+    std::atomic<size_t> head_;  // 已确认数据的开始位置（原子变量）
+    size_t mid_;                // 已发送但未确认数据的开始位置
+    size_t tail_;               // 未发送数据的结束位置
+    
+    // 延迟更新的统计变量
     size_t total_size_;      // 总数据大小
     size_t unack_size_;      // 已发送但未确认的数据大小
     size_t unsent_size_;     // 未发送的数据大小
     size_t available_size_;  // 可用空间大小
+    
+    // 待确认的数据量（无锁更新）
+    std::atomic<size_t> pending_ack_{0};
     
     // 同步原语
     mutable std::shared_mutex rw_mutex_;
@@ -443,7 +448,7 @@ private:
     std::condition_variable m_cv;
     std::atomic<bool> is_valid_{true};
 
-    // 原子变量
+    // 原子统计变量（供外部查询）
     std::atomic<size_t> atomic_total_size_{0};
     std::atomic<size_t> atomic_unack_size_{0};
     std::atomic<size_t> atomic_unsent_size_{0};
@@ -482,19 +487,35 @@ public:
     bool full() const { return available() == 0; }
     bool is_valid() const { return is_valid_.load(std::memory_order_acquire); }
 
+    // 应用延迟更新（在需要写锁的操作中调用）
+    void apply_pending_updates() {
+        size_t acked = pending_ack_.exchange(0, std::memory_order_acq_rel);
+        if (acked > 0) {
+            // 更新统计变量
+            unack_size_ -= acked;
+            total_size_ -= acked;
+            available_size_ += acked;
+            
+            update_atomic_vars();
+        }
+    }
+
     // 写入数据到未发送区域
     size_t write(const void* data, size_t len) {
-        if (!is_valid() || data == nullptr || len == 0 || full()) return 0;
+        if (!is_valid() || data == nullptr || len == 0) return 0;
         
         std::unique_lock lock(rw_mutex_);
         
+        // 应用延迟更新
+        apply_pending_updates();
+        
+        if (available_size_ == 0) return 0;
+        
         len = std::min(len, available_size_);
-        if (len == 0) return 0;
-
         const unsigned char* src = static_cast<const unsigned char*>(data);
         
         // 计算连续可写入空间
-        size_t contiguous = calc_contiguous_write_size(tail_, head_);
+        size_t contiguous = calc_contiguous_write_size();
         size_t to_write = std::min(len, contiguous);
         
         // 写入第一部分
@@ -515,11 +536,12 @@ public:
         return len;
     }
 
-    // 安全的批量写入
+    // 安全的批量写入 - 在等待时进行延迟更新
     size_t write_safe(const void* data, size_t len, int timeout_ms = 5000) {
         if (!is_valid() || data == nullptr || len == 0) return 0;
         
-        if (!wait_available_cv(len, timeout_ms)) {
+        // 先检查是否有足够空间，如果没有则等待
+        if (!wait_available_with_update(len, timeout_ms)) {
             return 0;
         }
         
@@ -532,6 +554,9 @@ public:
         
         std::unique_lock lock(rw_mutex_);
         
+        // 应用延迟更新
+        apply_pending_updates();
+        
         len = std::min(len, unsent_size_);
         mid_ = (mid_ + len) % capacity_;
         unsent_size_ -= len;
@@ -542,21 +567,26 @@ public:
         return len;
     }
 
-    // 确认已发送数据（移动head指针）
+    // 确认已发送数据（无锁更新，只移动head指针）
     size_t mark_ack(size_t len) {
-        if (!is_valid() || len == 0 || unack_size_ == 0) return 0;
+        if (!is_valid() || len == 0) return 0;
         
-        std::unique_lock lock(rw_mutex_);
+        // 无锁更新head指针
+        size_t current_head = head_.load(std::memory_order_acquire);
+        size_t new_head = (current_head + len) % capacity_;
         
-        len = std::min(len, unack_size_);
-        head_ = (head_ + len) % capacity_;
-        unack_size_ -= len;
-        total_size_ -= len;
-        available_size_ += len;
+        // 使用CAS确保原子性更新
+        while (!head_.compare_exchange_weak(current_head, new_head, 
+                                          std::memory_order_release,
+                                          std::memory_order_acquire)) {
+            // 如果CAS失败，重新计算new_head
+            new_head = (current_head + len) % capacity_;
+        }
         
-        update_atomic_vars();
+        // 记录待确认的数据量（无锁）
+        pending_ack_.fetch_add(len, std::memory_order_release);
         
-        // 通知等待空间的线程
+        // 通知等待空间的线程（无锁通知）
         m_cv.notify_all();
         
         return len;
@@ -576,14 +606,21 @@ public:
 
     // 获取未确认数据的区域
     const unsigned char* get_unack_region(size_t& size) const {
-        std::shared_lock lock(rw_mutex_);
-        if (unack_size_ == 0) {
+        // 使用原子head_，不需要锁
+        size_t current_head = head_.load(std::memory_order_acquire);
+        size_t current_mid = mid_;  // mid_只在主线程更新，相对安全
+        
+        if (current_head == current_mid) {
             size = 0;
             return nullptr;
         }
-        size_t contiguous = calc_contiguous_size(head_, mid_);
-        size = std::min(contiguous, unack_size_);
-        return &buffer_[head_];
+        
+        size_t contiguous = calc_contiguous_size(current_head, current_mid);
+        size_t unack_size = (current_mid >= current_head) ? 
+                           (current_mid - current_head) : 
+                           (capacity_ - current_head + current_mid);
+        size = std::min(contiguous, unack_size);
+        return &buffer_[current_head];
     }
 
     // 获取可写区域
@@ -593,16 +630,22 @@ public:
             size = 0;
             return nullptr;
         }
-        size_t contiguous = calc_contiguous_write_size(tail_, head_);
+        size_t contiguous = calc_contiguous_write_size();
         size = std::min(contiguous, available_size_);
         return &buffer_[tail_];
     }
 
-    // 等待可用空间
-    bool wait_available_cv(size_t required_size, int timeout_ms = 5000) {
+    // 等待可用空间并在被唤醒时进行延迟更新
+    bool wait_available_with_update(size_t required_size, int timeout_ms = 5000) {
         std::unique_lock<std::mutex> lock(m_cv_mutex);
         
         auto predicate = [this, required_size]() {
+            // 检查是否需要更新统计信息
+            if (pending_ack_.load(std::memory_order_acquire) > 0) {
+                // 在等待期间发现有pending更新，先应用更新
+                std::unique_lock rw_lock(rw_mutex_);
+                apply_pending_updates();
+            }
             return !is_valid() || available_size_ >= required_size;
         };
         
@@ -621,12 +664,19 @@ public:
         return available_size_ >= required_size;
     }
 
+    // 原有的wait_available_cv（兼容性）
+    bool wait_available_cv(size_t required_size, int timeout_ms = 5000) {
+        return wait_available_with_update(required_size, timeout_ms);
+    }
+
     // 清空缓冲区
     void clear() {
         std::unique_lock lock(rw_mutex_);
-        head_ = mid_ = tail_ = 0;
+        head_.store(0, std::memory_order_release);
+        mid_ = tail_ = 0;
         total_size_ = unack_size_ = unsent_size_ = 0;
         available_size_ = capacity_;
+        pending_ack_.store(0, std::memory_order_release);
         
         update_atomic_vars();
         m_cv.notify_all();
@@ -640,6 +690,17 @@ public:
         return buffer_.data();
     }
 
+    // 获取当前head位置（原子操作）
+    size_t get_head() const {
+        return head_.load(std::memory_order_acquire);
+    }
+
+    // 强制应用pending更新
+    void force_update() {
+        std::unique_lock lock(rw_mutex_);
+        apply_pending_updates();
+    }
+
 private:
     // 计算连续空间
     size_t calc_contiguous_size(size_t from, size_t to) const {
@@ -651,21 +712,22 @@ private:
     }
 
     size_t calc_contiguous_write_size() const {
+        size_t current_head = head_.load(std::memory_order_acquire);
+        
         if (full()) return 0;
         
         // 如果缓冲区为空，整个缓冲区都是连续可写的
         if (empty()) return capacity_;
         
         // 如果 tail 在 head 之前，连续空间到缓冲区末尾
-        if (tail_ < head_) {
-            return head_ - tail_;
+        if (tail_ < current_head) {
+            return current_head - tail_;
         }
         // 如果 tail 在 head 之后，连续空间到缓冲区末尾
         else {
             return capacity_ - tail_;
         }
     }
-
 
     // 更新原子变量
     void update_atomic_vars() {
