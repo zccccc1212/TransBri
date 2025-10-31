@@ -658,7 +658,7 @@ int SoR_connection::post_send_data_with_imm(){
     else
     {
         //fprintf(stdout, "RDMA WRITE with immediate was posted, will_to_send: %u\n", will_to_send);
-        std::lock_guard<std::mutex> lock(m_recv_mutex);
+        //std::lock_guard<std::mutex> lock(m_recv_mutex);
         remote_recv_buffer -= will_to_send;
     }
 
@@ -744,7 +744,7 @@ void SoR_connection::update_my_remote_recv_window_notify(){
 std::mutex g_cq_poll_mutex;
 
 size_t SoR_connection::poll_recv_completion() {
-    struct ibv_wc wc;
+    struct ibv_wc wc_array[3200];
     unsigned long start_time_msec;
     unsigned long cur_time_msec;
     struct timeval cur_time;
@@ -761,7 +761,7 @@ size_t SoR_connection::poll_recv_completion() {
             if (!lock.owns_lock()) {
                 return 0; // 锁被占用，直接返回
             }
-            poll_result = ibv_poll_cq(m_res.recv_cq, 1, &wc);
+            poll_result = ibv_poll_cq(m_res.recv_cq, 3200, wc_array);
         }
         gettimeofday(&cur_time, NULL);
         cur_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
@@ -774,24 +774,27 @@ size_t SoR_connection::poll_recv_completion() {
         fprintf(stderr, "recv completion not found after timeout\n");
         return -2;
     } else {
-        if (wc.status != IBV_WC_SUCCESS) {
-            fprintf(stderr, "recv failed with status: 0x%x\n", wc.status);
-            return -3;
-        }
-        if(wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM){
-            uint32_t imm_data = wc.imm_data;
-            uint32_t this_seg_len = ntohl(imm_data);
-            m_recv_rb->updateTail(this_seg_len);
-            update_my_recv_window_reduce(this_seg_len);
-        }
-        else if (wc.opcode == IBV_WC_RECV)
-        {
-            //TODO notify sender recv window has updated
-            this->update_my_remote_recv_window_notify();
-            printf("this send is to notify remote to update recv window\n");
-        }
-        else{
-            fprintf(stderr, "we don't expect to get a wc not recv and recv with imm \n");
+        for(int i = 0;i < poll_result;++i){
+            if (wc_array[i].status != IBV_WC_SUCCESS) {
+                fprintf(stderr, "recv failed with status: 0x%x\n", wc_array[i].status);
+                return -3;
+            }
+            if(wc_array[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM){
+                uint32_t imm_data = wc_array[i].imm_data;
+                uint32_t this_seg_len = ntohl(imm_data);
+                m_recv_rb->updateTail(this_seg_len);
+                update_my_recv_window_reduce(this_seg_len);
+                post_receive_for_recv_window();
+            }
+            else if (wc_array[i].opcode == IBV_WC_RECV)
+            {
+                //TODO notify sender recv window has updated
+                this->update_my_remote_recv_window_notify();
+                printf("this send is to notify remote to update recv window\n");
+            }
+            else{
+                fprintf(stderr, "we don't expect to get a wc not recv and recv with imm \n");
+            }
         }
         return 1;
     }

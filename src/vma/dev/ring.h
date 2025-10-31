@@ -1315,6 +1315,7 @@ private:
                 fprintf(stderr, "Failed status %s (%d)\n", ibv_wc_status_str(wc_array[i].status), // 这个函数可以直接将状态码转为字符串
                 wc_array[i].status);
                 debug_print_send_completions();
+                m_connection->print_stats_for_debug();
                 m_send_errors++;
                 std::terminate();
                 //continue;
