@@ -61,7 +61,8 @@ class pkt_rcvr_sink;
 #define ring_logfuncall		__log_info_funcall
 #define ring_logfine		__log_info_fine
 
-#define MR_SIZE 4294967296
+//#define MR_SIZE 4294967296 // 4GB
+#define MR_SIZE 268435456   //256MB
 
 typedef enum {
 	CQT_RX,
@@ -759,7 +760,8 @@ private:
 
     size_t m_recv_buf;                      // will be regis as MR too
     struct ibv_mr *my_recv_window_mr;
-
+    size_t m_recv_buf_remote;      //这个代表对面存储的接收方的接收缓冲区的大小，每次收到数据这个会减小，但是单纯调用recv并不更新这个变量，只有当这个变量低到一个临界点（比如30%），说明在发送方看来接收缓冲区可能快用完了
+                                    //这时，将这个值更新位真正的接收窗口的大小，并通知发送方更新接收窗口
 
 	int m_qpn;
 	int m_recv_cqn;
@@ -842,13 +844,14 @@ public:
         std::lock_guard<std::mutex> lock(m_recv_mutex);
         
         m_recv_buf -= bytes_transed;
+        m_recv_buf_remote -= bytes_transed;
         return static_cast<int>(m_recv_buf);
     }
 
     // 线程安全的查询
     uint32_t get_recv_window() const {
         std::lock_guard<std::mutex> lock(m_recv_mutex);
-        return m_recv_buf;
+        return m_recv_buf_remote;
     }
 
         // 发送队列限制相关函数

@@ -3215,7 +3215,7 @@ process_recv_data:
 
 	p_sor_conn->post_receive_for_recv_window();
 
-	if(p_sor_conn->get_recv_window() == 0){
+	if(p_sor_conn->get_recv_window() <= 10*1024*1024){//当发送方维护的接收缓冲区小于10MB时，更新
 		p_sor_conn->update_my_recv_window_add(total_read);
 		p_sor_conn->sync_remote_recv_window();
 	}

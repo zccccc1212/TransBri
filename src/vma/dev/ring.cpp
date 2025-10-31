@@ -236,7 +236,7 @@ int SoR_connection::create_rdma_resources(){
 
     //set the recv window as MR
     
-    remote_recv_window_mr = ibv_reg_mr(m_res.pd, (void *)&remote_recv_buffer, sizeof(remote_recv_window_mr), mr_flags);
+    remote_recv_window_mr = ibv_reg_mr(m_res.pd, (void *)&remote_recv_buffer, sizeof(remote_recv_buffer), mr_flags);
     //remote_recv_window_mr = ibv_reg_mr(m_res.pd, (void *)&remote_recv_buffer, 4, mr_flags);
 
     if(!remote_recv_window_mr){
@@ -377,8 +377,9 @@ int SoR_connection::connect_to_peer(){
     this->total_send = 0;
     this->next_remote_to_write = remote_con_data.addr;
     this->remote_recv_buffer = MR_SIZE;
-
-	/* save the remote side attributes, we will need it for the post SR */
+    m_recv_buf_remote = MR_SIZE;
+	
+    /* save the remote side attributes, we will need it for the post SR */
     m_res.remote_props = remote_con_data;
     //fprintf(stdout, "  Remote address = 0x%"PRIx64"\n", remote_con_data.addr);
     fprintf(stdout, " Remote rkey = 0x%x\n", remote_con_data.rkey);
@@ -657,6 +658,7 @@ int SoR_connection::post_send_data_with_imm(){
     else
     {
         //fprintf(stdout, "RDMA WRITE with immediate was posted, will_to_send: %u\n", will_to_send);
+        std::lock_guard<std::mutex> lock(m_recv_mutex);
         remote_recv_buffer -= will_to_send;
     }
 
@@ -671,6 +673,10 @@ size_t SoR_connection::sync_remote_recv_window(){
     struct ibv_sge sge;
     struct ibv_send_wr *bad_wr = NULL;
     int rc;
+
+    std::lock_guard<std::mutex> lock(m_recv_mutex);
+    m_recv_buf_remote = m_recv_buf;
+
 
     // prepare the scatter/gather entry 
     memset(&sge, 0, sizeof(sge));
