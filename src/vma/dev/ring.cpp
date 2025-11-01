@@ -79,9 +79,6 @@ SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/)
     : m_fd(fd)
     , cur_send_wr_id(0)
     , cur_recv_wr_id(0)
-    , outstanding_send_requests(0)
-    , max_outstanding_sends(8000)  // 默认值，可以根据需要调整
-    , send_queue_shutdown(false)
 {
 	m_gidindex = 4;// 144 : 4  ; 155 : 2;
     m_send_rb = nullptr;
@@ -98,7 +95,7 @@ SoR_connection::SoR_connection(int fd /*fd is the key to find sor conn*/)
     config.cpu_core = 4;                    // 绑定到CPU核心2
     config.realtime_scheduling = true;      // 启用实时调度（需要root权限）
     config.thread_name = "RDMA-CQE-Poller"; // 线程名称
-    config.scheduling_priority = 90;        // 调度优先级
+    config.scheduling_priority = 99;        // 调度优先级
 
     m_cqe_poller = new CQEPoller(this, config);
 
@@ -486,7 +483,7 @@ int SoR_connection::modify_qp_to_rtr(){
     int rc;
     memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_RTR;
-    attr.path_mtu = IBV_MTU_256;
+    attr.path_mtu = IBV_MTU_4096;
     attr.dest_qp_num = m_res.remote_props.qp_num;
     attr.rq_psn = 0;
     attr.max_dest_rd_atomic = 1;
@@ -608,6 +605,10 @@ int SoR_connection::post_send_data_with_imm(){
     int rc;
     size_t continues_size;
     int flag = 0;
+
+    if(!try_acquire_send_slot()){
+        return 0;
+    }
 
     size_t cur_data_size = m_send_rb->unsent_size();
     size_t remote_recv_buf = get_remote_recv_buf();

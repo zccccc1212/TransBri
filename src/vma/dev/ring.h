@@ -784,16 +784,11 @@ private:
 
     struct ibv_device_attr m_device_attr;
 
-
-    std::atomic<uint32_t> outstanding_send_requests;  // 当前未完成的发送请求数量
-    uint32_t max_outstanding_sends;                   // 最大允许的未完成发送请求数
-    mutable std::mutex send_queue_mutex;              // 发送队列互斥锁
-    std::condition_variable send_queue_cv;            // 发送队列条件变量
-    bool send_queue_shutdown;                         // 关闭标志
+    // 添加纯原子变量计数RDMA发送请求
+    std::atomic<uint32_t> m_rdma_send_request_count{0};
+    uint32_t m_max_rdma_send_requests{8000};  // 最大发送请求数
 
 public:
-
-
     struct resources m_res;
 
     SendBuffer * m_send_rb;
@@ -854,13 +849,59 @@ public:
         return m_recv_buf_remote;
     }
 
-        // 发送队列限制相关函数
-    void set_max_outstanding_sends(uint32_t max_sends);
-    uint32_t get_outstanding_send_count() const;
-    uint32_t get_max_outstanding_sends() const;
-    bool wait_for_send_slot(int timeout_ms = -1);
-    void notify_send_completion();
-    void shutdown_send_queue();
+    // 发送队列限制相关函数
+    // 尝试获取发送槽位（非阻塞）
+    bool try_acquire_send_slot() {
+        uint32_t current = m_rdma_send_request_count.load(std::memory_order_relaxed);
+        
+        if (current >= m_max_rdma_send_requests) {
+            return false;
+        }
+        
+        // 使用CAS操作确保原子性增加
+        return m_rdma_send_request_count.compare_exchange_weak(
+            current, current + 1, std::memory_order_acquire, std::memory_order_relaxed);
+    }
+
+    // 获取发送槽位（带自旋等待）
+    void acquire_send_slot() {        
+        while (true) {
+            uint32_t current = m_rdma_send_request_count.load(std::memory_order_relaxed);
+            
+            if (current < m_max_rdma_send_requests) {
+                if (m_rdma_send_request_count.compare_exchange_weak(
+                    current, current + 1, std::memory_order_acquire, std::memory_order_relaxed)) {
+                    break; // 成功获取槽位
+                }
+                // CAS失败，继续重试
+            } else {
+                // 达到上限，短暂休眠后重试
+                std::this_thread::yield();
+            }
+        }
+    }
+
+    // 批量释放发送槽位
+    void release_send_slots(uint32_t count) {
+        m_rdma_send_request_count.fetch_sub(count, std::memory_order_release);
+    }
+
+    // 获取当前发送请求计数
+    uint32_t get_send_request_count() const {
+        return m_rdma_send_request_count.load(std::memory_order_relaxed);
+    }
+
+    // 获取最大发送请求数
+    uint32_t get_max_send_requests() const {
+        return m_max_rdma_send_requests;
+    }
+
+    // 新增方法：检查是否有可用槽位
+    bool has_available_send_slot() const {
+        return m_rdma_send_request_count.load(std::memory_order_relaxed) < 
+               m_max_rdma_send_requests;
+    }
+
 
     // 启动轮询线程
     void start_cqe_poller();
@@ -1252,13 +1293,13 @@ private:
             }
             
             // 批量轮询接收CQ
-            int recv_polled = batch_poll_recv_cq(wc_array, POLL_BATCH_SIZE);
+/*            int recv_polled = batch_poll_recv_cq(wc_array, POLL_BATCH_SIZE);
             if (recv_polled > 0) {
                 //had_work = true;
                 //consecutive_idle_cycles = 0;
                 process_recv_completions(wc_array, recv_polled);
             }
-
+*/
 //要不考虑不准睡眠呢，会是什么反应，重新测试一下到时候
 //TODO
 /*            // 自适应睡眠策略
@@ -1310,6 +1351,7 @@ private:
     }
     
     void process_send_completions(struct ibv_wc* wc_array, int count) {
+        m_connection->release_send_slots(count);
         for (int i = 0; i < count; i++) {
             if (wc_array[i].status != IBV_WC_SUCCESS) {
                 fprintf(stderr, "Failed status %s (%d)\n", ibv_wc_status_str(wc_array[i].status), // 这个函数可以直接将状态码转为字符串
