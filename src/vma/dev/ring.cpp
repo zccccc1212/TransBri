@@ -33,6 +33,12 @@
 
 #include "ring.h"
 #include "vma/proto/route_table_mgr.h"
+#include <cstring>
+#include <stdexcept>
+#include <algorithm>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
 
 #undef  MODULE_NAME
 #define MODULE_NAME     "ring"
@@ -834,8 +840,7 @@ int SoR_connection::post_send_notify_with_imm() {
 
 
 
-
-
+//SoRconn_collection impl
 SoRconn_collection::SoRconn_collection(){
 
 }
@@ -843,8 +848,6 @@ SoRconn_collection::SoRconn_collection(){
 SoRconn_collection::~SoRconn_collection(){
     clear();
 }
-
-
 
 int SoRconn_collection::add_sorconn(int fd /*fd is key*/){
 
@@ -874,7 +877,7 @@ SoR_connection* SoRconn_collection::find_sorconn(int fd){
     return it->second;
 }
 
-int  SoRconn_collection::remove_sorconn(int fd){
+int SoRconn_collection::remove_sorconn(int fd){
     auto it = m_conn_map.find(fd);
     if(it == m_conn_map.end()){// 本来就不存在
         return -1; 
@@ -900,8 +903,1402 @@ void SoRconn_collection::clear(){
 }
 
 
+//CQManager udp impl
+// 构造函数
+CQManager::CQManager() 
+    : m_shared_send_cq(nullptr)
+    , m_shared_recv_cq(nullptr)
+    , m_polling_stop(false)
+    , m_send_completions(0)
+    , m_recv_completions(0)
+    , m_send_errors(0)
+    , m_recv_errors(0) {
+    std::cout << "CQManager created (singleton)" << std::endl;
+}
+
+// 析构函数
+CQManager::~CQManager() {
+    cleanup();
+    std::cout << "CQManager destroyed" << std::endl;
+}
+
+// 创建共享的CQ
+bool CQManager::createSharedCQs(ibv_context* context, 
+                               uint32_t send_cq_size,
+                               uint32_t recv_cq_size,
+                               void* send_cq_context,
+                               void* recv_cq_context) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    // 如果CQ已经创建，先清理
+    if (m_shared_send_cq || m_shared_recv_cq) {
+        cleanup();
+    }
+    
+    // 创建发送CQ
+    m_shared_send_cq = ibv_create_cq(context, send_cq_size, 
+                                    send_cq_context, nullptr, 0);
+    if (!m_shared_send_cq) {
+        std::cerr << "Failed to create shared send CQ: " << strerror(errno) << std::endl;
+        return false;
+    }
+    
+    // 创建接收CQ
+    m_shared_recv_cq = ibv_create_cq(context, recv_cq_size,
+                                    recv_cq_context, nullptr, 0);
+    if (!m_shared_recv_cq) {
+        std::cerr << "Failed to create shared recv CQ: " << strerror(errno) << std::endl;
+        ibv_destroy_cq(m_shared_send_cq);
+        m_shared_send_cq = nullptr;
+        return false;
+    }
+    
+    std::cout << "Created shared CQs: send_cq=" << m_shared_send_cq 
+              << ", recv_cq=" << m_shared_recv_cq << std::endl;
+    return true;
+}
+
+// 启动轮询线程
+void CQManager::startPollingThreads() {
+    if (m_polling_stop) {
+        m_polling_stop = false;
+        
+        // 启动发送CQ轮询线程
+        if (m_shared_send_cq) {
+            m_send_polling_thread = std::thread(&CQManager::sendPollingThread, this);
+            std::cout << "Started send CQ polling thread" << std::endl;
+        }
+        
+        // 启动接收CQ轮询线程
+        if (m_shared_recv_cq) {
+            m_recv_polling_thread = std::thread(&CQManager::recvPollingThread, this);
+            std::cout << "Started recv CQ polling thread" << std::endl;
+        }
+    }
+}
+// 发送轮询线程函数
+void CQManager::sendPollingThread() {
+    std::cout << "Send polling thread started" << std::endl;
+    
+    while (!m_polling_stop.load(std::memory_order_acquire)) {
+        // 轮询发送CQ，使用非阻塞方式
+        int num_completions = pollSendCq(10); // 0表示非阻塞
+        
+        // 如果没有完成事件，短暂休眠避免CPU过度占用
+        if (num_completions == 0) {
+            // 使用std::this_thread::sleep_for替代条件变量等待
+            std::this_thread::sleep_for(std::chrono::microseconds(10)); // 10微秒
+        }
+    }
+    
+    std::cout << "Send polling thread exiting" << std::endl;
+}
+
+// 接收轮询线程函数
+void CQManager::recvPollingThread() {
+    std::cout << "Recv polling thread started" << std::endl;
+    
+    while (!m_polling_stop.load(std::memory_order_acquire)) {
+        // 轮询接收CQ，使用非阻塞方式
+        int num_completions = pollRecvCq(10); // 0表示非阻塞
+        
+        // 如果没有完成事件，短暂休眠避免CPU过度占用
+        if (num_completions == 0) {
+            // 使用std::this_thread::sleep_for替代条件变量等待
+            std::this_thread::sleep_for(std::chrono::microseconds(10)); // 10微秒
+        }
+        
+    }
+    
+    std::cout << "Recv polling thread exiting" << std::endl;
+}
+
+// 轮询发送CQ
+int CQManager::pollSendCq(int timeout_ms) {
+    if (!m_shared_send_cq) {
+        std::cerr << "Shared send CQ not created" << std::endl;
+        return -1;
+    }
+    
+    int num_completions = 0;
+    ibv_wc wc;
+    
+    // 轮询CQ
+    while (true) {
+        int ret = ibv_poll_cq(m_shared_send_cq, 1, &wc);
+        if (ret < 0) {
+            std::cerr << "Error polling send CQ: " << strerror(errno) << std::endl;
+            m_send_errors++;
+            return -1;
+        } else if (ret == 0) {
+            // 没有完成事件
+            break;
+        }
+        
+        // 处理完成事件
+        handleSendCompletion(wc);
+        num_completions++;
+        m_send_completions++;
+        
+        // 检查是否还有更多完成事件
+        if (timeout_ms > 0) {
+            // 如果有超时限制，只处理一次
+            break;
+        }
+    }
+    
+    return num_completions;
+}
+
+// 轮询接收CQ
+int CQManager::pollRecvCq(int timeout_ms) {
+    if (!m_shared_recv_cq) {
+        std::cerr << "Shared recv CQ not created" << std::endl;
+        return -1;
+    }
+    
+    int num_completions = 0;
+    ibv_wc wc;
+    
+    // 轮询CQ
+    while (true) {
+        int ret = ibv_poll_cq(m_shared_recv_cq, 1, &wc);
+        if (ret < 0) {
+            std::cerr << "Error polling recv CQ: " << strerror(errno) << std::endl;
+            m_recv_errors++;
+            return -1;
+        } else if (ret == 0) {
+            // 没有完成事件
+            break;
+        }
+        
+        // 处理完成事件
+        handleRecvCompletion(wc);
+        num_completions++;
+        m_recv_completions++;
+        
+        // 检查是否还有更多完成事件
+        if (timeout_ms > 0) {
+            // 如果有超时限制，只处理一次
+            break;
+        }
+    }
+    
+    return num_completions;
+}
+
+// 处理发送完成事件
+void CQManager::handleSendCompletion(ibv_wc& wc) {
+    if (wc.status != IBV_WC_SUCCESS) {
+        std::cout << "send wc something wrong happen " << std::endl;
+    }
+
+    int fd = QpnToFdMap::get().getFd(wc.qp_num);
+    Socket_transbridge* sock_ptr = nullptr;
+    if (fd != -1) {
+        sock_ptr = my_fd_collection_get_sockfd(fd);
+        // 要进行动态类型转换
+        if (sock_ptr) {
+            Socket_tb_udp* udp_sock = dynamic_cast<Socket_tb_udp*>(sock_ptr);
+            if (udp_sock) {
+                bool success = udp_sock->m_rdma_manager->send_buffer()->mark_block_sent_completed();
+                    if (!success) {
+                        std::cerr << "Warning: Failed to mark block as sent completed for QP " 
+                                  << wc.qp_num << std::endl;
+                    }
+            }
+            else {
+                std::cerr << "Warning: Socket is not UDP type for QP " << wc.qp_num << std::endl;
+            }
+        } else {
+            std::cerr << "Warning: No socket found for fd " << fd << std::endl;
+        }
+    } else {
+        std::cerr << "Warning: No fd found for QP " << wc.qp_num << std::endl;
+    }
+    // 默认处理：打印完成事件信息
+        std::cout << "Send completion: QP=" << qp_name 
+                  << " (qp_num=" << wc.qp_num << ")"
+                  << ", wr_id=" << wc.wr_id
+                  << ", status=" << ibv_wc_status_str(wc.status)
+                  << ", opcode=" << wc.opcode
+                  << ", byte_len=" << wc.byte_len 
+                  << ", fd=" << fd
+                  << std::endl;
+    
+    
+}
+
+// 处理接收完成事件
+void CQManager::handleRecvCompletion(ibv_wc& wc) {
+
+    if (wc.status != IBV_WC_SUCCESS) {
+        std::cout << "recv wc something wrong happen " << std::endl;
+    }
+
+     int fd = QpnToFdMap::get().getFd(wc.qp_num);
+    Socket_transbridge* sock_ptr = nullptr;
+    
+    // 通过QP号找到对应的socket
+    if (fd != -1) {
+        sock_ptr = my_fd_collection_get_sockfd(fd);
+        
+        // 要进行动态类型转换，确保是UDP类型的socket
+        if (sock_ptr) {
+            Socket_tb_udp* udp_sock = dynamic_cast<Socket_tb_udp*>(sock_ptr);
+            
+            if (udp_sock) {
+                // 1. 更新接收缓冲区状态
+                if (udp_sock->m_rdma_manager && udp_sock->m_rdma_manager->recv_buffer()) {
+                    // 标记接收缓冲区中已接收完成的块
+                    bool success = udp_sock->m_rdma_manager->recv_buffer()->mark_block_received_completed();
+                }
+            }
+            else {
+                std::cerr << "Warning: Socket is not UDP type for QP " << wc.qp_num << std::endl;
+            }
+        } else {
+            std::cerr << "Warning: No socket found for fd " << fd << std::endl;
+        }
+    } else {
+        std::cerr << "Warning: No fd found for QP " << wc.qp_num << std::endl;
+    }
+    // 默认处理：打印完成事件信息
+        std::cout << "recv completion: QP=" << qp_name 
+                  << " (qp_num=" << wc.qp_num << ")"
+                  << ", wr_id=" << wc.wr_id
+                  << ", status=" << ibv_wc_status_str(wc.status)
+                  << ", opcode=" << wc.opcode
+                  << ", byte_len=" << wc.byte_len 
+                  << ", fd=" << fd
+                  << std::endl;
+}
+
+
+// 停止轮询线程
+void CQManager::stopPollingThreads() {
+    m_polling_stop = true;
+    
+    // 通知轮询线程
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_cv.notify_all();
+    }
+    
+    // 等待线程结束
+    if (m_send_polling_thread.joinable()) {
+        m_send_polling_thread.join();
+        std::cout << "Send polling thread stopped" << std::endl;
+    }
+    
+    if (m_recv_polling_thread.joinable()) {
+        m_recv_polling_thread.join();
+        std::cout << "Recv polling thread stopped" << std::endl;
+    }
+}
+
+
+//UD qp
+// 单例实例
+
+UDRdmaManager::UDRdmaManager(uint32_t local_ip, uint16_t local_port)
+    : local_ip_(local_ip), local_port_(local_port) {
+    // 构造函数实现
+}
+
+UDRdmaManager::~UDRdmaManager() {
+    cleanup();
+}
+
+bool UDRdmaManager::initialize(uint32_t local_ip, uint16_t local_port,int sockfd,
+                                   size_t send_buffer_size,
+                                   size_t recv_buffer_size,
+                                   uint32_t max_send_wr,
+                                   uint32_t max_recv_wr,
+                                   uint32_t max_send_sge,
+                                   uint32_t max_recv_sge
+                                    ) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    if (m_initialized) {
+        std::cout << "RDMA manager already initialized" << std::endl;
+        return true;
+    }
+    
+    std::cout << "Initializing Simple RDMA Manager..." << std::endl;
+    
+    // 步骤1: 发现并打开设备
+    if (!discoverAndOpenDevice()) {
+        return false;
+    }
+    
+    // 步骤2: 创建保护域
+    if (!createProtectionDomain()) {
+        cleanup();
+        return false;
+    }
+
+     // 查询GID（应该在设备发现和打开后调用）
+    if (!queryGid()) {
+        std::cerr << "Warning: Failed to query GID, continuing without GID" << std::endl;
+        return false;
+    }
+    
+    // 步骤3: 创建完成队列
+    if (!createCompletionQueues()) {
+        cleanup();
+        return false;
+    }
+    
+    // 步骤4: 分配和注册内存（可选）
+    // 这里可能还需要重新考虑，因为要和ringbuffer联动起来
+    if (send_buffer_size > 0 || recv_buffer_size > 0) {
+        if (!allocateAndRegisterMemory(local_ip, local_port, send_buffer_size, recv_buffer_size)) {
+            cleanup();
+            return false;
+        }
+    }
+    
+    // 步骤5: 创建UD队列对
+    if (!createUdQueuePair(max_send_wr, max_recv_wr, max_send_sge, max_recv_sge, sockfd)) {
+        cleanup();
+        return false;
+    }
+    
+    // 步骤6: 初始化UD QP
+    if (!initUdQp()) {
+        cleanup();
+        return false;
+    }
+    
+    // 步骤7: 发布初始接收工作请求（WR）
+    // 在初始化完成后立即发布接收WR，数量等于接收缓冲区的块数
+    if (recv_buffer_ && recv_buffer_size > 0) {
+        size_t initial_recv_wrs = recv_buffer_->block_count();
+        std::cout << "Posting initial " << initial_recv_wrs 
+                  << " receive WRs for buffer of " << recv_buffer_size << " blocks" << std::endl;
+        
+        size_t posted = post_recv(initial_recv_wrs);
+        
+        if (posted != initial_recv_wrs) {
+            std::cerr << "Warning: Failed to post all initial receive WRs. "
+                      << "Posted " << posted << " out of " << initial_recv_wrs << std::endl;
+        } else {
+            std::cout << "Successfully posted " << posted << " initial receive WRs" << std::endl;
+        }
+    } else {
+        std::cerr << "Warning: No receive buffer created, skipping initial receive WR posting" << std::endl;
+    }
+
+    m_initialized = true;
+    std::cout << "Simple RDMA Manager initialized successfully!" << std::endl;
+    printInfo();
+    
+    return true;
+}
+
+void UDRdmaManager::cleanup() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    if (!m_initialized) return;
+    
+    std::cout << "Cleaning up RDMA resources..." << std::endl;
+    
+    // 销毁QP
+    if (m_resources.qp) {
+        ibv_destroy_qp(m_resources.qp);
+        m_resources.qp = nullptr;
+    }
+    
+    // 注销内存区域
+    if (m_resources.memory.recv_mr) {
+        ibv_dereg_mr(m_resources.memory.recv_mr);
+        m_resources.memory.recv_mr = nullptr;
+    }
+    
+    if (m_resources.memory.send_mr) {
+        ibv_dereg_mr(m_resources.memory.send_mr);
+        m_resources.memory.send_mr = nullptr;
+    }
+    
+    // 释放缓冲区
+    if (m_resources.memory.recv_buf) {
+        free(m_resources.memory.recv_buf);
+        m_resources.memory.recv_buf = nullptr;
+    }
+    
+    if (m_resources.memory.send_buf) {
+        free(m_resources.memory.send_buf);
+        m_resources.memory.send_buf = nullptr;
+    }
+    
+    // 销毁CQ
+    if (m_resources.recv_cq) {
+        ibv_destroy_cq(m_resources.recv_cq);
+        m_resources.recv_cq = nullptr;
+    }
+    
+    if (m_resources.send_cq) {
+        ibv_destroy_cq(m_resources.send_cq);
+        m_resources.send_cq = nullptr;
+    }
+    
+    // 销毁PD
+    if (m_resources.pd) {
+        ibv_dealloc_pd(m_resources.pd);
+        m_resources.pd = nullptr;
+    }
+    
+    // 关闭设备上下文
+    if (m_resources.context) {
+        ibv_close_device(m_resources.context);
+        m_resources.context = nullptr;
+    }
+    
+    m_initialized = false;
+    std::cout << "RDMA resources cleaned up" << std::endl;
+}
+
+bool UDRdmaManager::discoverAndOpenDevice() {
+    int num_devices = 0;
+    ibv_device** dev_list = ibv_get_device_list(&num_devices);
+    
+    if (!dev_list) {
+        setLastError("Failed to get IB devices list");
+        return false;
+    }
+    
+    if (num_devices == 0) {
+        ibv_free_device_list(dev_list);
+        setLastError("No RDMA devices found");
+        return false;
+    }
+    
+    std::cout << "Found " << num_devices << " RDMA device(s)" << std::endl;
+    
+    // 显示所有设备信息
+    for (int i = 0; i < num_devices; ++i) {
+        const char* dev_name = ibv_get_device_name(dev_list[i]);
+        std::cout << "  Device " << i << ": " << dev_name;
+        
+        // 如果是第一个设备，标记为将选择的设备
+        if (i == 0) {
+            std::cout << " (will use this device)";
+        }
+        std::cout << std::endl;
+    }
+    
+    // 始终选择第一个设备
+    ibv_device* selected_device = dev_list[0];
+    const char* dev_name = ibv_get_device_name(selected_device);
+    m_resources.device.name = dev_name;
+    
+    // 打开设备
+    m_resources.context = ibv_open_device(selected_device);
+    ibv_free_device_list(dev_list);
+    
+    if (!m_resources.context) {
+        setLastError("Failed to open RDMA device");
+        return false;
+    }
+    
+    std::cout << "Opened device: " << m_resources.device.name << std::endl;
+    
+    // 查询端口属性（尝试端口1，如果失败则尝试端口2）
+    m_resources.device.port_num = 1;
+    ibv_port_attr port_attr;
+    if (ibv_query_port(m_resources.context, m_resources.device.port_num, &port_attr)) {
+        m_resources.device.port_num = 2;
+        if (ibv_query_port(m_resources.context, m_resources.device.port_num, &port_attr)) {
+            setLastError("Failed to query port attributes");
+            return false;
+        }
+    }
+    
+    m_resources.device.lid = port_attr.lid;
+    std::cout << "Using port " << (int)m_resources.device.port_num 
+              << ", LID: 0x" << std::hex << m_resources.device.lid << std::dec << std::endl;
+    
+    return true;
+}
+
+bool UDRdmaManager::createProtectionDomain() {
+    m_resources.pd = ibv_alloc_pd(m_resources.context);
+    if (!m_resources.pd) {
+        setLastError("Failed to allocate protection domain");
+        return false;
+    }
+    
+    std::cout << "Created protection domain" << std::endl;
+    return true;
+}
+
+
+bool UDRdmaManager::createCompletionQueues() {
+    // 获取CQManager单例
+    CQManager& cq_manager = CQManager::getInstance();
+    
+    // 检查共享CQ是否已经创建
+    if (cq_manager.getSharedSendCq() && cq_manager.getSharedRecvCq()) {
+        // 共享CQ已经存在，直接使用
+        
+        std::cout << "Using existing shared completion queues: send_cq=" << m_resources.send_cq 
+                  << ", recv_cq=" << m_resources.recv_cq << std::endl;
+        return true;
+    }
+    
+    // 共享CQ不存在，创建新的共享CQ
+    if (!cq_manager.createSharedCQs(m_resources.context, 8000, 8000, nullptr, nullptr)) {
+        setLastError("Failed to create shared completion queues");
+        return false;
+    }
+    
+    // 启动轮询线程
+    cq_manager.startPollingThreads();
+    
+    std::cout << "Created shared completion queues: send_cq=" << m_resources.send_cq 
+              << ", recv_cq=" << m_resources.recv_cq << std::endl;
+    return true;
+}
+
+bool UDRdmaManager::allocateAndRegisterMemory(uint32_t local_ip, uint16_t local_port, size_t send_block_count, size_t recv_block_count) {
+    // 创建发送缓冲区
+    if (send_block_count > 0) {
+        try {
+            send_buffer_ = std::make_unique<SequentialUdpBuffer>(
+                local_ip, local_port, send_block_count);
+        } catch (const std::exception& e) {
+            setLastError(std::string("Failed to create send buffer: ") + e.what());
+            return false;
+        }
+        
+        // 获取发送缓冲区的内存信息
+        unsigned char* send_buf = send_buffer_->buffer_data();
+        size_t send_size = send_buffer_->buffer_size();
+        
+        // 注册发送缓冲区为MR
+        int send_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ;
+        send_mr_ = ibv_reg_mr(m_resources.pd, send_buf, send_size, send_access_flags);
+        
+        if (!send_mr_) {
+            send_buffer_.reset();
+            setLastError("Failed to register send memory region");
+            return false;
+        }
+        
+        std::cout << "Registered send memory: " << send_size << " bytes" 
+                  << " (" << send_block_count << " blocks)"
+                  << ", lkey=0x" << std::hex << send_mr_->lkey 
+                  << ", rkey=0x" << send_mr_->rkey << std::dec << std::endl;
+    }
+    
+    // 创建接收缓冲区
+    if (recv_block_count > 0) {
+        try {
+            recv_buffer_ = std::make_unique<SequentialUdpBuffer>(
+                local_ip, local_port, recv_block_count);
+        } catch (const std::exception& e) {
+            setLastError(std::string("Failed to create receive buffer: ") + e.what());
+            
+            // 如果接收缓冲区创建失败，清理已创建的发送缓冲区
+            if (send_mr_) {
+                ibv_dereg_mr(send_mr_);
+                send_mr_ = nullptr;
+                send_buffer_.reset();
+            }
+            return false;
+        }
+        
+        // 获取接收缓冲区的内存信息
+        unsigned char* recv_buf = recv_buffer_->buffer_data();
+        size_t recv_size = recv_buffer_->buffer_size();
+        
+        // 注册接收缓冲区为MR
+        int recv_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE;
+        recv_mr_ = ibv_reg_mr(m_resources.pd, recv_buf, recv_size, recv_access_flags);
+        
+        if (!recv_mr_) {
+            recv_buffer_.reset();
+            
+            // 如果接收MR注册失败，清理已创建的发送MR
+            if (send_mr_) {
+                ibv_dereg_mr(send_mr_);
+                send_mr_ = nullptr;
+                send_buffer_.reset();
+            }
+            
+            setLastError("Failed to register receive memory region");
+            return false;
+        }
+        
+        std::cout << "Registered receive memory: " << recv_size << " bytes" 
+                  << " (" << recv_block_count << " blocks)"
+                  << ", lkey=0x" << std::hex << recv_mr_->lkey 
+                  << ", rkey=0x" << recv_mr_->rkey << std::dec << std::endl;
+    }
+    
+    return true;
+}
+
+UDRdmaManager::MemoryRegions UDRdmaManager::get_memory_regions() const {
+    MemoryRegions regions;
+    regions.send_mr = send_mr_;
+    regions.recv_mr = recv_mr_;
+    regions.send_size = send_buffer_ ? send_buffer_->buffer_size() : 0;
+    regions.recv_size = recv_buffer_ ? recv_buffer_->buffer_size() : 0;
+    return regions;
+}
+
+bool UDRdmaManager::createUdQueuePair(uint32_t max_send_wr,
+                                         uint32_t max_recv_wr,
+                                         uint32_t max_send_sge,
+                                         uint32_t max_recv_sge,
+                                        int socket_fd) {
+    ibv_qp_init_attr qp_init_attr;
+    memset(&qp_init_attr, 0, sizeof(qp_init_attr));
+    
+    // 设置UD QP属性
+    qp_init_attr.qp_type = IBV_QPT_UD;  // UD类型
+    qp_init_attr.sq_sig_all = 1;        // 所有发送请求都产生完成事件
+    
+
+
+    // 获取CQManager单例
+    CQManager& cq_manager = CQManager::getInstance();
+    
+    // 获取共享CQ
+    ibv_cq* shared_send_cq = cq_manager.getSharedSendCq();
+    ibv_cq* shared_recv_cq = cq_manager.getSharedRecvCq();
+
+    // 检查共享CQ是否已创建
+    if (!shared_send_cq || !shared_recv_cq) {
+        setLastError("Shared CQs not created. Call CQManager::createSharedCQs first.");
+        return false;
+    }
+
+    // 使用共享CQ
+    qp_init_attr.send_cq = shared_send_cq;
+    qp_init_attr.recv_cq = shared_recv_cq;
+    
+    qp_init_attr.cap.max_send_wr = max_send_wr;
+    qp_init_attr.cap.max_recv_wr = max_recv_wr;
+    qp_init_attr.cap.max_send_sge = max_send_sge;
+    qp_init_attr.cap.max_recv_sge = max_recv_sge;
+    qp_init_attr.cap.max_inline_data = 0;  // 内联数据大小，0表示不使用内联
+    
+    m_resources.qp = ibv_create_qp(m_resources.pd, &qp_init_attr);
+    if (!m_resources.qp) {
+        setLastError("Failed to create UD queue pair");
+        return false;
+    }
+    
+    std::cout << "Created UD queue pair, QP number: 0x" << std::hex 
+              << m_resources.qp->qp_num << std::dec << std::endl;
+    
+    // 建立QP与socket fd的映射
+    if (socket_fd >= 0) {
+        QpnToFdMap::get().add(m_resources.qp->qp_num, socket_fd);
+        std::cout << "Mapped QPN " << std::hex << m_resources.qp->qp_num 
+                  << std::dec << " to socket FD " << socket_fd << std::endl;
+    }
+
+
+    return true;
+}
+
+
+bool UDRdmaManager::initUdQp() {
+    // 对于UD QP，我们需要将其状态从RESET修改为INIT
+    ibv_qp_attr qp_attr;
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    
+    qp_attr.qp_state = IBV_QPS_INIT;
+    qp_attr.pkey_index = 0;
+    qp_attr.port_num = m_resources.device.port_num;
+    qp_attr.qkey = 0x111111;  // UD QP需要设置qkey，这里使用一个默认值
+    
+    int flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_QKEY;
+    
+    if (ibv_modify_qp(m_resources.qp, &qp_attr, flags)) {
+        setLastError("Failed to modify UD QP to INIT state");
+        return false;
+    }
+    
+    // 然后从INIT修改为RTR（准备接收）
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    qp_attr.qp_state = IBV_QPS_RTR;
+    
+    flags = IBV_QP_STATE;
+    
+    if (ibv_modify_qp(m_resources.qp, &qp_attr, flags)) {
+        setLastError("Failed to modify UD QP to RTR state");
+        return false;
+    }
+    
+    // 最后从RTR修改为RTS（准备发送）
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    qp_attr.qp_state = IBV_QPS_RTS;
+    qp_attr.sq_psn = 0;  // UD QP需要设置PSN
+    
+    flags = IBV_QP_STATE | IBV_QP_SQ_PSN;
+    
+    if (ibv_modify_qp(m_resources.qp, &qp_attr, flags)) {
+        setLastError("Failed to modify UD QP to RTS state");
+        return false;
+    }
+    
+    std::cout << "UD QP initialized to RTS state" << std::endl;
+    return true;
+}
+
+
+void UDRdmaManager::deregisterMemory(ibv_mr* mr) {
+    if (mr) {
+        ibv_dereg_mr(mr);
+        std::cout << "Deregistered memory region" << std::endl;
+    }
+}
+
+void UDRdmaManager::printInfo() const {
+    std::cout << "\n=== Simple RDMA Manager Info ===" << std::endl;
+    std::cout << "Status: " << (m_initialized ? "Initialized" : "Not initialized") << std::endl;
+    
+    if (m_initialized) {
+        std::cout << "Device: " << m_resources.device.name << std::endl;
+        std::cout << "Port: " << (int)m_resources.device.port_num << std::endl;
+        std::cout << "LID: 0x" << std::hex << m_resources.device.lid << std::dec << std::endl;
+        std::cout << "QP number: 0x" << std::hex << getQpNum() << std::dec << std::endl;
+        std::cout << "QP type: UD (Unreliable Datagram)" << std::endl;
+        
+        if (m_resources.memory.send_buf) {
+            std::cout << "Send buffer: " << m_resources.memory.send_size << " bytes" << std::endl;
+        }
+        
+        if (m_resources.memory.recv_buf) {
+            std::cout << "Receive buffer: " << m_resources.memory.recv_size << " bytes" << std::endl;
+        }
+    }
+    std::cout << "================================\n" << std::endl;
+}
+
+void UDRdmaManager::setLastError(const std::string& error) {
+    strncpy(m_errorMsg, error.c_str(), sizeof(m_errorMsg) - 1);
+    m_errorMsg[sizeof(m_errorMsg) - 1] = '\0';
+    std::cerr << "RDMA Error: " << error << std::endl;
+}
+
+void UDRdmaManager::setLastError(int errnum) {
+    strncpy(m_errorMsg, strerror(errnum), sizeof(m_errorMsg) - 1);
+    m_errorMsg[sizeof(m_errorMsg) - 1] = '\0';
+    std::cerr << "RDMA Error: " << m_errorMsg << std::endl;
+}
+
+// 轮询发送完成队列
+int UDRdmaManager::pollSendCompletionQueue(int timeout_ms = 100) {//默认每次轮询轮询100ms
+    if (!m_initialized || !m_resources.send_cq) {
+        setLastError("Send CQ not initialized");
+        return -1;
+    }
+    
+    return pollCompletionQueue(m_resources.send_cq, timeout_ms);
+}
+
+// 轮询接收完成队列
+int UDRdmaManager::pollRecvCompletionQueue(int timeout_ms = 100) {
+    if (!m_initialized || !m_resources.recv_cq) {
+        setLastError("Receive CQ not initialized");
+        return -1;
+    }
+    
+    return pollCompletionQueue(m_resources.recv_cq, timeout_ms);
+}
+
+// 通用的轮询完成队列方法
+int UDRdmaManager::pollCompletionQueue(ibv_cq* cq, int timeout_ms) {
+    if (!cq) {
+        setLastError("Invalid completion queue");
+        return -1;
+    }
+    
+    const int MAX_CQE_PER_POLL = 8000;  // 与CQ大小匹配
+    ibv_wc wc_array[MAX_CQE_PER_POLL];
+    
+    // 如果指定了超时时间，使用带超时的轮询
+    if (timeout_ms > 0) {
+        struct timeval start_time, current_time;
+        gettimeofday(&start_time, NULL);
+        
+        do {
+            // 尝试轮询CQ，一次轮询多个CQE
+            int num_completions = ibv_poll_cq(cq, MAX_CQE_PER_POLL, wc_array);
+            
+            if (num_completions > 0) {
+                // 处理所有完成事件
+                int total_handled = 0;
+                for (int i = 0; i < num_completions; i++) {
+                    int result = handleCompletion(wc_array[i]);
+                    if (result > 0) {
+                        total_handled++;
+                    } else if (result < 0) {
+                        // 发生错误，但继续处理剩余CQE
+                        std::cerr << "Error handling completion #" << i << std::endl;
+                    }
+                }
+                return total_handled;  // 返回成功处理的CQE数量
+            } else if (num_completions < 0) {
+                setLastError("Error polling completion queue");
+                return -1;
+            }
+            
+            // 检查是否超时
+            gettimeofday(&current_time, NULL);
+            long elapsed_ms = (current_time.tv_sec - start_time.tv_sec) * 1000 +
+                             (current_time.tv_usec - start_time.tv_usec) / 1000;
+            
+            if (elapsed_ms >= timeout_ms) {
+                // 超时，没有完成事件
+                return 0;
+            }     
+            
+        } while (true);
+    } 
+    // 如果没有指定超时时间，立即轮询一次
+    else if (timeout_ms == 0) {
+        // 非阻塞轮询，立即返回
+        int num_completions = ibv_poll_cq(cq, MAX_CQE_PER_POLL, wc_array);
+        
+        if (num_completions > 0) {
+            // 处理所有完成事件
+            int total_handled = 0;
+            for (int i = 0; i < num_completions; i++) {
+                int result = handleCompletion(wc_array[i]);
+                if (result > 0) {
+                    total_handled++;
+                } else if (result < 0) {
+                    std::cerr << "Error handling completion #" << i << std::endl;
+                }
+            }
+            return total_handled;
+        } else if (num_completions < 0) {
+            setLastError("Error polling completion queue");
+            return -1;
+        }
+        
+        // 没有完成事件
+        return 0;
+    }
+    // timeout_ms < 0 表示阻塞轮询（无限等待）
+    else {
+        while (true) {
+            // 阻塞轮询，每次轮询多个CQE
+            int num_completions = ibv_poll_cq(cq, MAX_CQE_PER_POLL, wc_array);
+            
+            if (num_completions > 0) {
+                // 处理所有完成事件
+                int total_handled = 0;
+                for (int i = 0; i < num_completions; i++) {
+                    int result = handleCompletion(wc_array[i]);
+                    if (result > 0) {
+                        total_handled++;
+                    } else if (result < 0) {
+                        std::cerr << "Error handling completion #" << i << std::endl;
+                    }
+                }
+                return total_handled;
+            } else if (num_completions < 0) {
+                setLastError("Error polling completion queue");
+                return -1;
+            }
+            
+            // 短暂休眠，避免忙等待消耗CPU
+            usleep(100); // 休眠100微秒
+        }
+    }
+}
+
+// 处理完成事件
+int UDRdmaManager::handleCompletion(ibv_wc& wc) {
+    if (wc.status != IBV_WC_SUCCESS) {
+        std::cerr << "Work completion error: " << ibv_wc_status_str(wc.status) 
+                  << " (opcode: " << wc.opcode << ", wr_id: " << wc.wr_id << ")" << std::endl;
+        
+        // 根据错误类型处理
+        switch (wc.status) {
+            case IBV_WC_RETRY_EXC_ERR:
+                setLastError("Retry exceeded error");
+                break;
+            case IBV_WC_RNR_RETRY_EXC_ERR:
+                setLastError("RNR retry exceeded error");
+                break;
+            case IBV_WC_LOC_QP_OP_ERR:
+                setLastError("Local QP operation error");
+                break;
+            case IBV_WC_LOC_PROT_ERR:
+                setLastError("Local protection error");
+                break;
+            case IBV_WC_WR_FLUSH_ERR:
+                setLastError("Work request flushed error");
+                break;
+            default:
+                setLastError("Unknown completion error");
+                break;
+        }
+        
+        // 返回负值表示错误
+        return -static_cast<int>(wc.status);
+    }
+    
+    // 成功完成，返回工作请求ID或操作类型
+    std::cout << "Completion success: opcode=" << wc.opcode 
+              << ", byte_len=" << wc.byte_len 
+              << ", wr_id=" << wc.wr_id << std::endl;
+    
+    // 根据操作类型返回不同的正值
+    switch (wc.opcode) {
+        case IBV_WC_SEND:
+            return 1;  // 发送完成
+        case IBV_WC_RECV:
+            return 2;  // 接收完成
+        case IBV_WC_RDMA_WRITE:
+            return 3;  // RDMA写完成
+        case IBV_WC_RDMA_READ:
+            return 4;  // RDMA读完成
+        default:
+            return wc.wr_id > 0 ? wc.wr_id : 1;  // 返回wr_id或默认值
+    }
+}
+
+// ============ 接收缓冲区相关方法实现 ============
+// 初始化静态原子变量
+std::atomic<uint64_t> UDRdmaManager::wr_id_counter_{0};
+
+size_t UDRdmaManager::post_recv(size_t n) {
+    if (!m_initialized || !m_resources.qp) {
+        setLastError("RDMA manager not initialized or QP not available");
+        return 0;
+    }
+    
+    if (n == 0) {
+        return 0;
+    }
+    
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    size_t posted_count = 0;
+    
+    for (size_t i = 0; i < n; ++i) {
+        if (!post_single_recv_internal()) {
+            // 如果发布失败，停止继续发布
+            break;
+        }
+        posted_count++;
+    }
+    
+    return posted_count;
+}
+
+bool UDRdmaManager::post_single_recv_internal() {
+    if (!recv_buffer_) {
+        setLastError("Receive buffer not created");
+        return false;
+    }
+    
+    // 检查接收缓冲区是否有可用空间
+    if (recv_buffer_->available_blocks() == 0) {
+        // 接收缓冲区已满，无法发布新的接收请求
+        return false;
+    }
+    
+    // 获取下一个接收位置的指针
+    unsigned char* recv_ptr = recv_buffer_->get_next_receive_ptr();
+    if (!recv_ptr) {
+        setLastError("Failed to get next receive pointer from buffer");
+        return false;
+    }
+    
+    // 获取接收缓冲区的MR信息
+    uint32_t lkey = getRecvBufferLkey();
+    if (lkey == 0) {
+        setLastError("Recv buffer MR not properly registered");
+        return false;
+    }
+    
+    // 准备接收工作请求
+    struct ibv_recv_wr wr, *bad_wr = nullptr;
+    struct ibv_sge sge;
+    
+    // 设置SGE
+    sge.addr = reinterpret_cast<uintptr_t>(recv_ptr);
+    sge.length = static_cast<uint32_t>(recv_buffer_->total_block_size());
+    sge.lkey = lkey;
+    
+    // 设置接收工作请求
+    memset(&wr, 0, sizeof(wr));
+    
+    // 使用全局递增的wr_id
+    wr.wr_id = wr_id_counter_.fetch_add(1, std::memory_order_relaxed);
+    
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    wr.next = nullptr;
+    
+    // 发布接收请求
+    int ret = ibv_post_recv(m_resources.qp, &wr, &bad_wr);
+    if (ret != 0) {
+        setLastError(ret);
+        return false;
+    }
+    
+    return true;
+}
+
+
+bool UDRdmaManager::updateLocalAddress(uint32_t new_local_ip, uint16_t new_local_port) {
+    // 检查是否与当前地址相同
+    if (local_ip_ == new_local_ip && local_port_ == new_local_port) {
+        return true;  // 地址未改变
+    }
+    
+    std::cout << "Updating local address from " 
+              << local_ip_ << ":" << local_port_
+              << " to " << new_local_ip << ":" << new_local_port << std::endl;
+    
+    // 更新本地地址
+    local_ip_ = new_local_ip;
+    local_port_ = new_local_port;
+    
+    // 重新配置发送缓冲区
+    if (send_buffer_) {
+        // 注意：这里可能需要重新创建或重新配置SequentialUdpBuffer
+        // 或者SequentialUdpBuffer应该支持动态更新本地地址
+        // 暂时记录警告
+        std::cout << "Warning: Local address changed, but buffers may still use old address" 
+                  << std::endl;
+    }
+    
+    return true;
+}
+
+bool UDRdmaManager::queryGid() {
+    // 查询GID
+    int gid_index = 4;  //
+    
+    ibv_gid gid;
+    int ret = ibv_query_gid(m_resources.context, m_resources.device.port_num, 
+                           gid_index, &gid);
+    
+    if (ret != 0) {
+        std::cerr << "Failed to query GID: " << strerror(errno) << std::endl;
+        m_gid_initialized = false;
+        memset(m_gid, 0, 16);
+        return false;
+    }
+    
+    // 复制GID到缓存
+    memcpy(m_gid, gid.raw, 16);
+    m_gid_initialized = true;
+    
+    // 打印GID（调试用）
+    std::cout << "GID queried successfully: ";
+    for (int i = 0; i < 16; i++) {
+        printf("%02x", m_gid[i]);
+        if (i % 2 == 1 && i != 15) printf(":");
+    }
+    printf("\n");
+    
+    return true;
+}
 
 
 
 
 
+
+
+SequentialUdpBuffer::SequentialUdpBuffer(uint32_t local_ip, uint16_t local_port,
+                                         size_t block_count)
+    : buffer_(block_count * BLOCK_TOTAL_SIZE),
+      block_valid_(block_count, false),
+      block_count_(block_count),
+      local_ip_(local_ip),
+      local_port_(local_port),
+      head_(0),
+      tail_(0),
+      used_blocks_(0),
+      next_receive_index_(0) {
+    
+    if (block_count == 0) {
+        throw std::invalid_argument("block_count must be greater than 0");
+    }
+}
+
+// ============ 缓冲区信息 ============
+size_t SequentialUdpBuffer::block_count() const noexcept { 
+    return block_count_; 
+}
+
+size_t SequentialUdpBuffer::data_capacity() const noexcept { 
+    return DATA_SIZE; 
+}
+
+size_t SequentialUdpBuffer::total_block_size() const noexcept { 
+    return BLOCK_TOTAL_SIZE; 
+}
+
+size_t SequentialUdpBuffer::header_size() const noexcept { 
+    return HEADER_SIZE; 
+}
+
+// ============ 缓冲区状态 ============
+size_t SequentialUdpBuffer::available_blocks() const noexcept { 
+    return block_count_ - used_blocks_.load(std::memory_order_acquire); 
+}
+
+size_t SequentialUdpBuffer::used_blocks() const noexcept { 
+    return used_blocks_.load(std::memory_order_acquire); 
+}
+
+bool SequentialUdpBuffer::has_data() const noexcept { 
+    return used_blocks_.load(std::memory_order_acquire) > 0; 
+}
+
+bool SequentialUdpBuffer::is_full() const noexcept { 
+    return used_blocks_.load(std::memory_order_acquire) >= block_count_; 
+}
+
+bool SequentialUdpBuffer::is_empty() const noexcept { 
+    return used_blocks_.load(std::memory_order_acquire) == 0; 
+}
+
+// ============ 本地地址信息 ============
+uint32_t SequentialUdpBuffer::local_ip() const noexcept { 
+    return local_ip_; 
+}
+
+uint16_t SequentialUdpBuffer::local_port() const noexcept { 
+    return local_port_; 
+}
+
+// ============ 发送缓冲区接口 ============
+bool SequentialUdpBuffer::write_block(const void* data, size_t len) {
+    if (!data || len == 0 || len > DATA_SIZE) {
+        return false;
+    }
+    
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    // 如果缓冲区已满，直接返回false（丢弃数据）
+    if (is_full()) {
+        return false;
+    }
+    
+    // 获取当前tail位置
+    size_t current_tail = tail_.load(std::memory_order_acquire);
+    
+    // 计算块在缓冲区中的偏移
+    size_t block_offset_bytes = current_tail * BLOCK_TOTAL_SIZE;
+    
+    // 写入头部到块的起始位置
+    BlockHeader* header = reinterpret_cast<BlockHeader*>(&buffer_[block_offset_bytes]);
+    header->source_ip = local_ip_;       // 使用绑定的本地IP
+    header->source_port = local_port_;   // 使用绑定的本地端口
+    header->data_length = static_cast<uint16_t>(len);
+    
+    // 计算数据部分的起始位置（头部之后）
+    size_t data_offset_bytes = block_offset_bytes + HEADER_SIZE;
+    unsigned char* data_ptr = &buffer_[data_offset_bytes];
+    
+    // 写入数据
+    memcpy(data_ptr, data, len);
+    
+    // 标记块为有效
+    block_valid_[current_tail] = true;
+    
+    // 更新tail指针（环形）
+    size_t next_tail = (current_tail + 1) % block_count_;
+    tail_.store(next_tail, std::memory_order_release);
+    
+    // 增加已使用块数
+    used_blocks_.fetch_add(1, std::memory_order_release);
+    
+    return true;
+}
+
+bool SequentialUdpBuffer::mark_block_sent_completed() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    if (is_empty()) {
+        return false;  // 没有数据可标记
+    }
+    
+    // 获取当前head位置
+    size_t current_head = head_.load(std::memory_order_acquire);
+    
+    // 标记这个块为无效（可重用）
+    block_valid_[current_head] = false;
+    
+    // 更新head指针（环形）
+    size_t next_head = (current_head + 1) % block_count_;
+    head_.store(next_head, std::memory_order_release);
+    
+    // 减少已使用块数
+    size_t old_used = used_blocks_.fetch_sub(1, std::memory_order_acq_rel);
+    if (old_used <= 1) {
+        used_blocks_.store(0, std::memory_order_release);
+    }
+    
+    return true;
+}
+
+// ============ 接收缓冲区接口 ============
+ssize_t SequentialUdpBuffer::read_block(void *buf, size_t nbytes,
+                                        struct sockaddr *srcAddr, socklen_t *addrlen) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    // 如果没有数据，直接返回0
+    if (is_empty()) {
+        return 0;
+    }
+    
+    // 获取当前head位置
+    size_t current_head = head_.load(std::memory_order_acquire);
+    
+    // 计算块在缓冲区中的偏移
+    size_t block_offset_bytes = current_head * BLOCK_TOTAL_SIZE;
+    
+    // 读取头部信息
+    BlockHeader* header = reinterpret_cast<BlockHeader*>(&buffer_[block_offset_bytes]);
+    
+    // 检查块是否有效
+    if (!block_valid_[current_head]) {
+        return 0;  // 块无效
+    }
+    
+    size_t data_len = header->data_length;
+    
+    // 如果提供的缓冲区太小，返回错误
+    if (nbytes < data_len) {
+        return -1;  // 缓冲区不足
+    }
+    
+    // 计算数据部分的起始位置
+    size_t data_offset_bytes = block_offset_bytes + HEADER_SIZE;
+    unsigned char* data_ptr = &buffer_[data_offset_bytes];
+    
+    // 复制数据到用户缓冲区
+    memcpy(buf, data_ptr, data_len);
+    
+    // 如果提供了srcAddr，填充源地址信息
+    if (srcAddr != nullptr && addrlen != nullptr && *addrlen >= sizeof(struct sockaddr_in)) {
+        struct sockaddr_in* sin = reinterpret_cast<struct sockaddr_in*>(srcAddr);
+        sin->sin_family = AF_INET;
+        sin->sin_addr.s_addr = header->source_ip;
+        sin->sin_port = header->source_port;
+        *addrlen = sizeof(struct sockaddr_in);
+    }
+    
+    // 标记块为无效（已读取）
+    block_valid_[current_head] = false;
+    
+    // 更新head指针（环形）
+    size_t next_head = (current_head + 1) % block_count_;
+    head_.store(next_head, std::memory_order_release);
+    
+    // 减少已使用块数
+    size_t old_used = used_blocks_.fetch_sub(1, std::memory_order_acq_rel);
+    if (old_used <= 1) {
+        used_blocks_.store(0, std::memory_order_release);
+    }
+    
+    return static_cast<ssize_t>(data_len);
+}
+
+bool SequentialUdpBuffer::mark_block_received_completed() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    // 检查是否已满
+    if (is_full()) {
+        return false;  // 缓冲区已满，无法添加新块
+    }
+    
+    // 获取当前tail位置
+    size_t current_tail = tail_.load(std::memory_order_acquire);
+    
+    // 标记这个块为有效
+    block_valid_[current_tail] = true;
+    
+    // 更新tail指针（环形）
+    size_t next_tail = (current_tail + 1) % block_count_;
+    tail_.store(next_tail, std::memory_order_release);
+    
+    // 增加已使用块数
+    used_blocks_.fetch_add(1, std::memory_order_release);
+    
+    return true;
+}
+
+// ============ 直接内存访问（用于RDMA） ============
+unsigned char* SequentialUdpBuffer::get_next_receive_ptr() {
+    // 原子地获取并递增next_receive_index_
+    size_t current_index = next_receive_index_.load(std::memory_order_acquire);
+    
+    // 计算块的起始地址
+    size_t block_offset = current_index * BLOCK_TOTAL_SIZE;
+    unsigned char* block_ptr = buffer_.data() + block_offset;
+    
+    // 递增next_receive_index_（环形）
+    size_t next_index = (current_index + 1) % block_count_;
+    next_receive_index_.store(next_index, std::memory_order_release);
+    
+    return block_ptr;
+}
+
+
+unsigned char* SequentialUdpBuffer::get_next_send_ptr() {
+    // 发送缓冲区使用：获取下一个要发送数据的位置
+    size_t current_head = head_.load(std::memory_order_acquire);
+    return &buffer_[current_head * BLOCK_TOTAL_SIZE];
+}
+
+unsigned char* SequentialUdpBuffer::get_head_ptr() {
+    size_t current_head = head_.load(std::memory_order_acquire);
+    return &buffer_[current_head * BLOCK_TOTAL_SIZE];
+}
+
+unsigned char* SequentialUdpBuffer::get_tail_ptr() {
+    size_t current_tail = tail_.load(std::memory_order_acquire);
+    return &buffer_[current_tail * BLOCK_TOTAL_SIZE];
+}
+
+// ============ RDMA内存注册接口 ============
+unsigned char* SequentialUdpBuffer::buffer_data() noexcept { 
+    return buffer_.data(); 
+}
+
+const unsigned char* SequentialUdpBuffer::buffer_data() const noexcept { 
+    return buffer_.data(); 
+}
+
+size_t SequentialUdpBuffer::buffer_size() const noexcept { 
+    return buffer_.size(); 
+}
+
+// ============ 指针位置信息 ============
+size_t SequentialUdpBuffer::get_head_index() const noexcept { 
+    return head_.load(std::memory_order_acquire); 
+}
+
+size_t SequentialUdpBuffer::get_tail_index() const noexcept { 
+    return tail_.load(std::memory_order_acquire); 
+}
+
+void SequentialUdpBuffer::clear() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    head_.store(0, std::memory_order_release);
+    tail_.store(0, std::memory_order_release);
+    used_blocks_.store(0, std::memory_order_release);
+    
+    // 重置所有块的有效标志
+    std::fill(block_valid_.begin(), block_valid_.end(), false);
+}

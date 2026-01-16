@@ -835,7 +835,12 @@ int socket_internal(int __domain, int __type, int __protocol, bool check_offload
 	if (!orig_os_api.socket) get_orig_funcs();
 	BULLSEYE_EXCLUDE_BLOCK_END
 
+	int original_type = __type;  // 保存原始类型
+    
+
 	int fd = orig_os_api.socket(__domain, __type, __protocol);
+
+
 	vlog_printf(VLOG_DEBUG, "ENTER: %s(domain=%s(%d), type=%s(%d), protocol=%d) = %d\n",__func__, socket_get_domain_str(__domain), __domain, socket_get_type_str(__type), __type, __protocol, fd);
 	if (fd < 0) {
 		return fd;
@@ -844,13 +849,12 @@ int socket_internal(int __domain, int __type, int __protocol, bool check_offload
 	int ret = 0;
 
 	if(my_g_p_fd_collection){
-		ret = my_g_p_fd_collection->add_socketfd(fd);
+		ret = my_g_p_fd_collection->add_socketfd(fd, __type);
 	}
 	else{
 		printf("my_g_p_fd_collection is null \n");
 		return fd;
 	}
-
 
 	if(ret == 1)//add sockfd succeed
 	{
@@ -859,8 +863,6 @@ int socket_internal(int __domain, int __type, int __protocol, bool check_offload
 	}
 
 	return fd;
-
-
 
 
 	if (g_p_fd_collection) {
@@ -950,7 +952,7 @@ int listen(int __fd, int backlog)
 
 	int ret = orig_os_api.listen(__fd, backlog);
 
-	Sockfd_tcp* p_socket = NULL;
+	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
 
 	if(p_socket){
@@ -997,7 +999,7 @@ int accept(int __fd, struct sockaddr *__addr, socklen_t *__addrlen)
 	if(my_g_p_fd_collection)
 		my_g_p_fd_collection->add_socketfd(myfd);
 
-	Sockfd_tcp* p_socket = NULL;
+	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(myfd);
 	if(p_socket){
 		p_socket->accept();
@@ -1050,10 +1052,10 @@ int bind(int __fd, const struct sockaddr *__addr, socklen_t __addrlen)
 	// zc add
 	int ret = orig_os_api.bind(__fd, __addr, __addrlen);
 
-	Sockfd_tcp* p_socket = NULL;
+	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
 	if(p_socket){
-		p_socket->bind(__addr,__addrlen);
+		p_socket->bind();
 	}
 	
 	return ret;
@@ -1112,7 +1114,7 @@ int connect(int __fd, const struct sockaddr *__to, socklen_t __tolen)
 	BULLSEYE_EXCLUDE_BLOCK_END
 	int ret = orig_os_api.connect(__fd, __to, __tolen);
 
-	Sockfd_tcp* p_socket = NULL;
+	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
 	if(p_socket){
 		p_socket->connect();
@@ -1480,7 +1482,7 @@ ssize_t read(int __fd, void *__buf, size_t __nbytes)
 	BULLSEYE_EXCLUDE_BLOCK_END
 	
 
-	Sockfd_tcp* p_socket = NULL;
+	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
 	if(p_socket){
 		return p_socket->read(__buf,  __nbytes);
@@ -1590,7 +1592,7 @@ ssize_t recv(int __fd, void *__buf, size_t __nbytes, int __flags)
 	BULLSEYE_EXCLUDE_BLOCK_END
 	
 
-	Sockfd_tcp* p_socket = NULL;
+	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
 	if(p_socket){
 		return p_socket->recv(__buf,  __nbytes, __flags);
@@ -1773,6 +1775,19 @@ EXPORT_SYMBOL
 ssize_t recvfrom(int __fd, void *__buf, size_t __nbytes, int __flags,
 		 struct sockaddr *__from, socklen_t *__fromlen)
 {
+
+	//zc add 
+	Socket_transbridge* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(__fd);
+	if(p_socket){
+		return p_socket->recvfrom(__fd, __buf, __nbytes, __flags, __to, __tolen);
+	}
+
+	return orig_os_api.recvfrom(__fd, __buf, __nbytes, __flags, __to, __tolen);
+
+
+
+
 	ssize_t ret_val = 0;
 
 	srdr_logfuncall_entry("fd=%d", __fd);
@@ -1860,7 +1875,7 @@ ssize_t write(int __fd, __const void *__buf, size_t __nbytes)
 
 
 	//zc add 
-	Sockfd_tcp* p_socket = NULL;
+	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
 	if(p_socket){
 		return p_socket->write(__buf, __nbytes);
@@ -1933,7 +1948,7 @@ ssize_t send(int __fd, __const void *__buf, size_t __nbytes, int __flags)
 	srdr_logfuncall_entry("fd=%d, nbytes=%d", __fd, __nbytes);
 
 	//zc add 
-	Sockfd_tcp* p_socket = NULL;
+	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
 	if(p_socket){
 		return p_socket->send(__buf,  __nbytes,  __flags);
@@ -2079,6 +2094,24 @@ EXPORT_SYMBOL
 ssize_t sendto(int __fd, __const void *__buf, size_t __nbytes, int __flags,
 	       const struct sockaddr *__to, socklen_t __tolen)
 {
+
+
+	//zc add 
+	Socket_transbridge* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(__fd);
+	if(p_socket){
+		return p_socket->sendto(__fd, __buf, __nbytes, __flags, __to, __tolen);
+	}
+
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.sendto) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
+
+
+	return orig_os_api.sendto(__fd, __buf, __nbytes, __flags, __to, __tolen);
+
+
+
 #ifdef RDTSC_MEASURE_TX_SENDTO_TO_AFTER_POST_SEND
 	RDTSC_TAKE_START(g_rdtsc_instr_info_arr[RDTSC_FLOW_SENDTO_TO_AFTER_POST_SEND]);
 #endif //RDTSC_MEASURE_TX_SENDTO_TO_AFTER_POST_SEND
@@ -2109,9 +2142,7 @@ ssize_t sendto(int __fd, __const void *__buf, size_t __nbytes, int __flags,
 		errno = EINVAL;
 		return -1;
 	}
-	BULLSEYE_EXCLUDE_BLOCK_START
-	if (!orig_os_api.sendto) get_orig_funcs();
-	BULLSEYE_EXCLUDE_BLOCK_END
+
 
 	return orig_os_api.sendto(__fd, __buf, __nbytes, __flags, __to, __tolen);
 }
@@ -3067,29 +3098,40 @@ sighandler_t signal(int signum, sighandler_t handler)
 
 
 //zc add
+//Socket_transbridge impl
+Socket_transbridge::Socket_transbridge(int fd){
+	m_fd = fd;
+}
+
+Socket_transbridge::~Socket_transbridge(){
+
+}
 
 
-Sockfd_tcp::Sockfd_tcp(int fd)
-    : m_fd(fd),send_buffer_current(0),recv_buffer_current(0)
+
+
+//Socket_tb_tcp impl
+Socket_tb_tcp::Socket_tb_tcp(int fd) 
+    : Socket_transbridge(fd) 
 {
-    // 使用值初始化确保所有成员处于安全状态
-	//resources_init();
+    // 验证这是一个TCP socket
     
+    setType(SOCKET_TYPE_TCP);
+    // 其他TCP特有的初始化，如设置TCP_NODELAY等
 }
 
-Sockfd_tcp::~Sockfd_tcp(){
+Socket_tb_tcp::~Socket_tb_tcp(){
 
 }
 
 
 
-int Sockfd_tcp::socket(){
+int Socket_tb_tcp::socket(){
 	
-
 	return m_fd;
 }
 
-int Sockfd_tcp::accept(){
+int Socket_tb_tcp::accept(){
 
 	
 	if(g_p_conn_collection){
@@ -3109,7 +3151,7 @@ int Sockfd_tcp::accept(){
 }
 
 
-int Sockfd_tcp::connect(){
+int Socket_tb_tcp::connect(){
 	//如何区分144和155，如何让各自找到自己对应的gid index，这是一个问题
 
 	if(g_p_conn_collection){
@@ -3128,7 +3170,7 @@ int Sockfd_tcp::connect(){
 	return m_fd;
 }
 
-int Sockfd_tcp::bind(const sockaddr *__addr, socklen_t __addrlen){
+int Socket_tb_tcp::bind(const sockaddr *__addr, socklen_t __addrlen){
 	if(__addr && __addrlen){
 
 	}
@@ -3137,7 +3179,7 @@ int Sockfd_tcp::bind(const sockaddr *__addr, socklen_t __addrlen){
 	return 0;
 }
 
-int Sockfd_tcp::listen(int backlog){
+int Socket_tb_tcp::listen(int backlog){
 	
 	if(backlog){
 
@@ -3146,17 +3188,17 @@ int Sockfd_tcp::listen(int backlog){
 	return 0;
 }
 
-ssize_t Sockfd_tcp::write(__const void *__buf, size_t __nbytes) {
+ssize_t Socket_tb_tcp::write(__const void *__buf, size_t __nbytes) {
     return tx(__buf, __nbytes, 0);
 }
 
 
-ssize_t Sockfd_tcp::read(void *__buf, size_t __nbytes){
+ssize_t Socket_tb_tcp::read(void *__buf, size_t __nbytes){
 	return rx(__buf, __nbytes, 0);
 }
 
 
-ssize_t Sockfd_tcp::rx(void *__buf, size_t __nbytes, int __flags){
+ssize_t Socket_tb_tcp::rx(void *__buf, size_t __nbytes, int __flags){
     size_t total_read = 0;
     size_t need_to_read;
     SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
@@ -3225,7 +3267,7 @@ process_recv_data:
     return total_read;
 }
 
-ssize_t Sockfd_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
+ssize_t Socket_tb_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
     ssize_t return_sz = 0;
 	size_t remote_recv_buf;
@@ -3315,7 +3357,7 @@ ssize_t Sockfd_tcp::tx(__const void *__buf, size_t __nbytes, int __flags){
 //如果是非阻塞send，看发送缓冲区有多大，能拷贝多少拷贝多少，然后立即返回
 //如果是阻塞send，看发送缓冲区有多大，不够的话就poll cq，直到有足够的发送缓冲区然后拷贝到发送缓冲区然后返回
 //现在是只考虑阻塞情况
-ssize_t Sockfd_tcp::send(__const void *__buf, size_t __nbytes, int __flags) {
+ssize_t Socket_tb_tcp::send(__const void *__buf, size_t __nbytes, int __flags) {
     if(__flags){
 
 	}
@@ -3328,11 +3370,1081 @@ ssize_t Sockfd_tcp::send(__const void *__buf, size_t __nbytes, int __flags) {
 //但返回的数据可能小于请求的字节数（只要当前有数据，就会返回当前可用的数据，最多不超过指定的缓冲区大小）。
 //非阻塞模式：recv会立即返回当前可用的数据，即使比请求的少，也不会等待。如果没有数据，则返回错误。
 //！！！阻塞模式下并不一定是要缓冲区的字节满足__nbytes的大小才会返回
-ssize_t Sockfd_tcp::recv(void *__buf, size_t __nbytes, int __flags) {
+ssize_t Socket_tb_tcp::recv(void *__buf, size_t __nbytes, int __flags) {
 	if(__flags){
 
 	}
     return rx(__buf, __nbytes, __flags);
+}
+
+//Socket_tb_udp impl
+Socket_tb_udp::Socket_tb_udp(int fd) 
+    : Socket_transbridge(fd)  // 调用基类构造函数
+{
+    setType(SOCKET_TYPE_UDP);
+    // 子类特有的初始化代码
+}
+
+Socket_tb_udp::~Socket_tb_udp(){
+
+}
+
+//udp和tcp不同，udp在申请socket以后可能就会马上调用sendto来发送数据了，逻辑上就需要一申请socket以后立马分配rdma资源，
+//只要检测到应用程序申请的socket类型是sock——dgram数据报类型的就立马申请ud qp的rdma资源，
+//（实际上一个进程可以只使用一个ud qp，现在只考虑最简单的通信情况）
+Socket_tb_udp::socket(){
+
+}
+
+//这是对于udp服务器端的，需要绑定到某一个ip地址和port然后再准备接收数据
+// 在bind函数中开始注册rdma资源，因为每一个socket最终都会绑定到某一个ip和port，在这一步注册最合理
+int Socket_tb_udp::bind() {
+    // 先看这个socket有没有bind
+	if(isBound()){
+		return 0;
+	}
+
+    // 如果没有绑定，获取绑定的本地地址信息
+    struct sockaddr_in local_addr;
+    socklen_t local_len = sizeof(local_addr);
+    if (orig_os_api.getsockname(m_sockfd, (struct sockaddr*)&local_addr, &local_len) < 0) {
+        std::cerr << "Failed to get socket name: " << strerror(errno) << std::endl;
+        return -1;
+    }
+    
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &local_addr.sin_addr, ip_str, sizeof(ip_str));
+    uint16_t port = ntohs(local_addr.sin_port);
+    
+    std::cout << "UDP socket bound to " << ip_str << ":" << port << std::endl;
+    
+    // 初始化 RDMA 管理器
+    if (!initRdmaManager(local_addr.sin_addr.s_addr, local_addr.sin_port, m_fd)) {
+        std::cerr << "Failed to initialize RDMA manager, falling back to regular UDP" << std::endl;
+        // 即使 RDMA 初始化失败，仍然返回成功，因为 UDP socket 绑定成功
+        // 后续会使用普通 UDP 通信
+        return result;
+    }
+
+    extractAddressFromSockaddr(local_addr, local_len);
+
+    m_rdma_initialized = true;
+    std::cout << "RDMA manager initialized successfully after bind" << std::endl;
+    
+    return result;
+}
+
+bool Socket_tb_udp::initRdmaManager(uint32_t local_ip, uint16_t local_port, int sockfd) {
+    // 初始化RDMA管理器
+    if (!m_rdma_manager.initialize(local_ip, local_port, sockfd)) {
+        std::cerr << "Failed to initialize RDMA manager: " << m_rdma_manager.getLastError() << std::endl;
+        return false;
+    }
+
+	m_pd = m_rdma_manager.getPd();  // 需要UDRdmaManager添加这个方法
+    
+    return true;
+}
+
+
+//note：按理来说，如果是udp传数据的话应该需要把这次我们通信的ip地址和端口号一起发送到对端
+Socket_tb_udp::sendto(__const void *__buf, size_t __nbytes, int __flags,
+	       const struct sockaddr *__to, socklen_t __tolen){
+	//1. 先查ip和port有没有记录，是不是有通信过
+	//2. 通过ip和port和对端尝试通过udp通信
+	//3. 交换qpn
+	//4. 要记录qpn和ip地址和port的对应关系
+
+	if (!buf || nbytes == 0 || !destAddr || addrlen != sizeof(sockaddr_in)) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    const sockaddr_in* to_addr = reinterpret_cast<const sockaddr_in*>(__to);
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &to_addr->sin_addr, ip_str, sizeof(ip_str));
+    int port = ntohs(to_addr->sin_port);
+    
+    std::cout << "sendto: Sending to " << ip_str << ":" << port 
+              << ", data size: " << __nbytes << std::endl;
+    
+    // 检查是否已经和对端交换过元数据
+    auto& peer_manager = GlobalPeerManager::instance();
+    const PeerInfo* peer = peer_manager.get_peer(ip_str, port);
+    
+    if (!peer) {
+        // 第一次通信，需要交换RDMA元数据
+        std::cout << "First communication with " << ip_str << ":" << port 
+                  << ", exchanging RDMA metadata..." << std::endl;
+        
+        // 在这里调用 establish_rdma_connection
+        if (!establish_rdma_connection(ip_str, port, , __to)) {
+            std::cerr << "Failed to establish RDMA connection, falling back to normal UDP" << std::endl;
+            // 如果建立RDMA连接失败，回退到普通UDP发送
+            return orig_os_api.sendto(m_fd, __buf, __nbytes, __flags, __to, __tolen);
+        }
+         
+        std::cout << "RDMA metadata exchange completed with " << ip_str << ":" << port << std::endl;
+    }
+	// 应该是先调用内核的sendto，让内核绑定到一个端口，然后再出来了才知道自己的ip地址和端口
+
+	// 确保RDMA管理器已初始化
+    if (!m_rdma_manager) {
+        // 如果没有初始化，尝试使用本地地址初始化
+		// 这里应该调用bind初始化，即使是有对端信息，但是这个socket可能是第一次调用，这样的话他就还没有进行rdma的初始化
+		// TODO: bind（）
+		Socket_tb_udp::bind();
+    }
+	    
+    // 1. 检查数据大小是否超过块的数据容量
+    if (__nbytes > m_rdma_manager->send_buffer().data_capacity()) {
+        std::cerr << "Data size " << __nbytes << " exceeds block capacity " 
+                  << m_rdma_manager->send_buffer().data_capacity() << std::endl;
+        errno = EMSGSIZE;
+        return -1;
+    }
+    
+    // 2. 将数据写入发送缓冲区
+    if (!m_rdma_manager->send_buffer().write_block(__buf, __nbytes)) {
+        std::cerr << "Failed to write data to send buffer, buffer may be full" << std::endl;
+        errno = EAGAIN;
+        return -1;
+    }
+    
+    // 3. 使用RDMA UD发送数据
+    bool rdma_success = post_send_to_peer(peer, __nbytes);
+    
+    if (!rdma_success) {
+        std::cerr << "RDMA send failed, falling back to normal UDP" << std::endl;
+        // 回退到普通UDP发送
+        return orig_os_api.sendto(m_fd, __buf, __nbytes, __flags, __to, __tolen);
+    }
+    
+    std::cout << "Data sent via RDMA UD to " << ip_str << ":" << port 
+              << " (QPN: " << peer->qpn << ")" << std::endl;
+    
+    return __nbytes;
+
+}
+
+
+
+bool Socket_tb_udp::establish_rdma_connection(const char* remote_ip, int remote_port,
+                                             const struct sockaddr* to_addr) {
+    std::cout << "Establishing RDMA connection to " << remote_ip << ":" << remote_port << std::endl;
+    
+    // 1. 检查是否已经绑定过，如果没有绑定，则需要先初始化RDMA资源
+    if (!m_rdma_initialized) {
+        // 获取当前socket的状态，检查是否已经绑定
+        struct sockaddr_in test_addr;
+
+        BULLSEYE_EXCLUDE_BLOCK_START
+        if (!orig_os_api.getsockname) get_orig_funcs();
+        BULLSEYE_EXCLUDE_BLOCK_END
+
+        socklen_t test_len = sizeof(test_addr);
+        if (orig_os_api.getsockname(m_fd, (struct sockaddr*)&test_addr, &test_len) == 0) {
+            // 如果已经绑定，获取本地地址
+            char local_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &test_addr.sin_addr, local_ip, sizeof(local_ip));
+            uint16_t local_port = ntohs(test_addr.sin_port);
+            
+            // 使用已有的本地地址初始化RDMA资源
+            if (!initRdmaManager(test_addr.sin_addr.s_addr, test_addr.sin_port, m_fd )) {
+                std::cerr << "Failed to initialize RDMA manager with existing bind" << std::endl;
+                return false;
+            }
+        } else {
+            // 还没有绑定，我们需要先初始化RDMA资源（使用临时地址）
+            std::cout << "Socket not yet bound, initializing RDMA with temporary address" << std::endl;
+            
+            // 使用0.0.0.0:0作为临时地址初始化RDMA资源
+            struct sockaddr_in temp_addr;
+            temp_addr.sin_family = AF_INET;
+            temp_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+            temp_addr.sin_port = 10000;  // 让内核分配端口
+            
+            if (!initRdmaManager(temp_addr.sin_addr.s_addr, temp_addr.sin_port, m_fd)) {// TODO : QP state modify
+                std::cerr << "Failed to initialize RDMA manager with temporary address" << std::endl;
+                return false;
+            }
+            
+            std::cout << "RDMA resources initialized with temporary address" << std::endl;
+        }
+        
+        m_rdma_initialized = true;
+    }
+    
+    // 2. 发送本地的RDMA元数据
+    if (!send_metadata(m_fd, to_addr, sizeof(sockaddr_in))) {
+        std::cerr << "Failed to send RDMA metadata" << std::endl;
+        return false;
+    }
+    
+    std::cout << "Sent local RDMA metadata to " << remote_ip << ":" << remote_port << std::endl;
+    
+    // 3. 接收对端的RDMA元数据
+    RDMA_Metadata remote_metadata;
+    struct sockaddr_in from_addr;
+    socklen_t from_len = sizeof(from_addr);
+    
+    if (!receive_metadata(m_fd, (struct sockaddr*)&from_addr, &from_len, remote_metadata)) {
+        std::cerr << "Failed to receive RDMA metadata" << std::endl;
+        return false;
+    }
+    
+    // 4. 验证源地址
+    char from_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &from_addr.sin_addr, from_ip, sizeof(from_ip));
+    int from_port = ntohs(from_addr.sin_port);
+    
+    if (strcmp(from_ip, remote_ip) != 0 || from_port != remote_port) {
+        std::cerr << "Unexpected source address: " << from_ip << ":" << from_port 
+                  << ", expected: " << remote_ip << ":" << remote_port << std::endl;
+        return false;
+    }
+    
+    // 打印GID（十六进制格式）
+    std::string gid_str;
+    for (int i = 0; i < 16; i++) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", remote_metadata.gid[i]);
+        gid_str += buf;
+        if (i % 2 == 1 && i != 15) gid_str += ":";
+    }
+    
+    std::cout << "Received RDMA metadata from " << from_ip << ":" << from_port 
+              << " (QPN: " << remote_metadata.qpn 
+              << ", GID: " << gid_str
+              << ", QKey: " << remote_metadata.qkey << ")" << std::endl;
+    
+    // 5. 获取内核分配的本地地址（如果之前没有绑定）
+    struct sockaddr_in local_addr;
+    socklen_t local_len = sizeof(local_addr);
+    if (orig_os_api.getsockname(m_fd, (struct sockaddr*)&local_addr, &local_len) == 0) {
+        char local_ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &local_addr.sin_addr, local_ip_str, sizeof(local_ip_str));
+        uint16_t local_port = ntohs(local_addr.sin_port);
+        
+        std::cout << "Socket bound to " << local_ip_str << ":" << local_port 
+                  << " (assigned by kernel)" << std::endl;
+        
+        // 6. 如果需要，更新RDMA管理器中的本地地址信息
+        updateRdmaLocalAddress(local_addr.sin_addr.s_addr, local_addr.sin_port);
+    }
+    
+    auto& peer_manager = GlobalPeerManager::instance();
+
+    // 7. 添加对端信息到全局映射
+    peer_manager.add_peer(remote_ip, remote_port, remote_metadata, m_pd);
+    
+    // 8. 获取对端的地址句柄（如果不存在则创建）
+    ibv_ah* ah = peer_manager.get_or_create_ah(remote_ip, remote_port, m_pd, remote_metadata.port_num);
+    if (!ah) {
+        std::cerr << "Failed to create AH for peer" << std::endl;
+        return false;
+    }
+    
+    std::cout << "RDMA connection established with " << remote_ip << ":" << remote_port << std::endl;
+    
+    return true;
+}
+
+// 发送元数据到对端
+bool Socket_tb_udp::send_metadata(int sockfd, const sockaddr* to, socklen_t tolen) {
+    // 获取本地RDMA元数据
+    RDMA_Metadata local_metadata;
+    local_metadata.qpn = m_rdma_manager.getQpNum();
+    local_metadata.port_num = m_rdma_manager.getPortNum();
+    local_metadata.qkey = m_rdma_manager.getQkey();
+    // 获取本地GID
+    m_rdma_manager.getGid(local_metadata.gid);  // 需要UDRdmaManager添加这个方法
+    
+    // 序列化元数据
+    char metadata_buffer[RDMA_Metadata::serialized_size()];
+    local_metadata.serialize(reinterpret_cast<uint8_t*>(metadata_buffer));
+    
+    // 获取原始函数指针（如果需要）
+    BULLSEYE_EXCLUDE_BLOCK_START
+    if (!orig_os_api.sendto) get_orig_funcs();
+    BULLSEYE_EXCLUDE_BLOCK_END
+    
+    // 发送元数据
+    ssize_t sent = orig_os_api.sendto(sockfd, metadata_buffer, sizeof(metadata_buffer), 0, to, tolen);
+    return sent == sizeof(metadata_buffer);
+}
+
+// 接收元数据从对端
+bool Socket_tb_udp::receive_metadata(int sockfd, sockaddr* from, socklen_t* fromlen, RDMA_Metadata& metadata) {
+    char metadata_buffer[RDMA_Metadata::serialized_size()];
+    
+    // 获取原始函数指针（如果需要）
+    BULLSEYE_EXCLUDE_BLOCK_START
+    if (!orig_os_api.recvfrom) get_orig_funcs();
+    BULLSEYE_EXCLUDE_BLOCK_END
+    
+    // 接收元数据
+    ssize_t recv_len = orig_os_api.recvfrom(sockfd, metadata_buffer, sizeof(metadata_buffer), 0, from, fromlen);
+    if (recv_len != sizeof(metadata_buffer)) {
+        return false;
+    }
+    
+    // 反序列化元数据
+    metadata.deserialize(reinterpret_cast<const uint8_t*>(metadata_buffer));
+    return true;
+}
+
+
+void Socket_tb_udp::updateRdmaLocalAddress(uint32_t new_ip, uint16_t new_port) {
+    if (!rdma_manager_) {
+        return;
+    }
+    
+    uint32_t new_ip_host = ntohl(new_ip);
+    uint16_t new_port_host = ntohs(new_port);
+    
+    std::cout << "Updating RDMA local address to: " 
+              << new_ip_host << ":" << new_port_host << std::endl;
+    
+    // 这里需要更新RDMA管理器中的本地地址
+    // 注意：如果SequentialUdpBuffer已经创建，可能需要重新创建
+    // 或者添加一个更新地址的方法
+    rdma_manager_->updateLocalAddress(new_ip_host, new_port_host);
+}
+
+
+bool Socket_tb_udp::post_send_to_peer(PeerInfo* peer, size_t data_len) {
+    if (!m_rdma_manager || !peer) {
+        return false;
+    }
+    
+    // 1. 获取发送缓冲区的下一个可读取块的数据指针
+    const unsigned char* data_ptr = m_rdma_manager->send_buffer().get_tail_ptr();
+    if (!data_ptr) {
+        std::cerr << "No data available in send buffer" << std::endl;
+        return false;
+    }
+    
+    // 2. 获取发送缓冲区的MR信息
+    auto mr_info = m_rdma_manager->get_memory_regions();
+    if (!mr_info.send_mr) {
+        std::cerr << "Send MR not registered" << std::endl;
+        return false;
+    }
+    
+    // 3. 构建SGE（Scatter/Gather Element）
+    struct ibv_sge sge;
+    sge.addr = (uintptr_t)data_ptr;
+    sge.length = static_cast<uint32_t>(data_len + m_rdma_manager->send_buffer().header_size());
+    sge.lkey = mr_info.send_mr->lkey;
+    
+    // 4. 构建Send Work Request
+    struct ibv_send_wr wr;
+    memset(&wr, 0, sizeof(wr));
+
+	static std::atomic<uint64_t> wr_id_counter{0};  // 函数内静态变量
+    wr.wr_id = wr_id_counter.fetch_add(1, std::memory_order_relaxed);//全局递增的wr_id
+
+    wr.next = nullptr;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    wr.opcode = IBV_WR_SEND;  // UD模式使用SEND操作
+    
+    // UD特定字段
+    wr.wr.ud.ah = peer->ah;                     // 地址句柄 
+    wr.wr.ud.remote_qpn = peer->metadata.qpn;   // 从metadata获取远程QP号
+    wr.wr.ud.remote_qkey = peer->metadata.qkey; // 从metadata获取QKey
+    
+    // 5. 发布Send Work Request
+    struct ibv_send_wr* bad_wr = nullptr;
+    
+    ibv_qp* qp = m_rdma_manager->getQp();  // 需要添加这个方法到UDRdmaManager
+    
+    if (!qp) {
+        std::cerr << "QP not available" << std::endl;
+        return false;
+    }
+    
+    int ret = ibv_post_send(qp, &wr, &bad_wr);
+    if (ret != 0) {
+        std::cerr << "Failed to post send WR: " << strerror(errno) << std::endl;
+        return false;
+    }
+    
+    return true;
+}
+
+ssize_t Socket_tb_udp::recvfrom(void *buf, size_t nbytes, int flags,
+                               sockaddr *srcAddr, socklen_t *addrlen) {
+    // 1. 首先检查接收缓冲区是否有数据
+    if (m_rdma_manager && m_rdma_manager->recv_buffer() && 
+        m_rdma_manager->recv_buffer()->has_data()) {
+        
+        // 直接从接收缓冲区读取数据
+        ssize_t bytes_read = m_rdma_manager->recv_buffer()->read_block(
+            buf, nbytes, srcAddr, addrlen);
+        
+        if (bytes_read > 0) {
+            // 成功从缓冲区读取数据后，发布一个新的接收WR
+            if (m_rdma_manager->recv_buffer()->available_blocks() > 0) {
+                m_rdma_manager->post_recv(1);
+            }
+            return bytes_read;
+        }
+        
+        // 如果bytes_read < 0，说明缓冲区太小，返回错误
+        if (bytes_read < 0) {
+            errno = EMSGSIZE;
+            return -1;
+        }
+    }
+    
+    // 2. 如果没有数据，根据flags决定行为
+    if (flags & MSG_DONTWAIT) {
+        // 非阻塞模式，立即返回
+        errno = EAGAIN;
+        return -1;
+    }
+    
+    // 3. 阻塞模式：设置socket为非阻塞，然后轮询等待
+    // 保存原始socket标志
+    int original_flags = orig_os_api.fcntl(m_fd, F_GETFL, 0);
+    if (original_flags == -1) {
+        perror("fcntl(F_GETFL) failed");
+        errno = EBADF;
+        return -1;
+    }
+    
+    // 临时设置为非阻塞
+    if (orig_os_api.fcntl(m_fd, F_SETFL, original_flags | O_NONBLOCK) == -1) {
+        perror("fcntl(F_SETFL) failed");
+        errno = EBADF;
+        return -1;
+    }
+    
+    // 4. 轮询等待：交替检查接收缓冲区和UDP socket
+    const int MAX_WAIT_MS = 5000;  // 最大等待5秒
+    const int CHECK_INTERVAL_US = 1000;  // 每次检查间隔1ms
+    int total_wait_us = 0;
+    
+    while (total_wait_us < MAX_WAIT_MS * 1000) {
+        // 首先检查接收缓冲区
+        if (m_rdma_manager && m_rdma_manager->recv_buffer() && 
+            m_rdma_manager->recv_buffer()->has_data()) {
+            
+            // 读取数据
+            ssize_t bytes_read = m_rdma_manager->recv_buffer()->read_block(
+                buf, nbytes, srcAddr, addrlen);
+            
+            if (bytes_read > 0) {
+                // 成功读取，发布新的接收WR
+                if (m_rdma_manager->recv_buffer()->available_blocks() > 0) {
+                    m_rdma_manager->post_recv(1);
+                }
+                
+                // 恢复socket标志
+                orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
+                return bytes_read;
+            }
+        }
+        
+        // 然后检查UDP socket是否有数据（非阻塞）
+        char temp_buf[65536];
+        sockaddr_storage temp_addr;
+        socklen_t temp_addrlen = sizeof(temp_addr);
+        
+        ssize_t recv_len = orig_os_api.recvfrom(m_fd, temp_buf, sizeof(temp_buf), 
+                                     MSG_DONTWAIT, 
+                                     (sockaddr*)&temp_addr, &temp_addrlen);
+        
+        if (recv_len > 0) {
+            // 处理UDP元数据
+            ssize_t result = handle_udp_metadata(temp_buf, recv_len, 
+                                                (sockaddr*)&temp_addr, temp_addrlen,
+                                                buf, nbytes, srcAddr, addrlen);
+            
+            // 恢复socket标志
+            orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
+            return result;
+        } else if (recv_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            // 真正的错误
+            orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
+            return -1;
+        }
+        
+        // 等待一小段时间再检查
+        usleep(CHECK_INTERVAL_US);
+        total_wait_us += CHECK_INTERVAL_US;
+    }
+    
+    // 恢复socket标志
+    orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
+    
+    // 超时
+    errno = EAGAIN;
+    return -1;
+}
+
+// 处理UDP元数据
+ssize_t Socket_tb_udp::handle_udp_metadata(char* temp_buf, ssize_t recv_len,
+                                          sockaddr_in& src_addr, socklen_t src_len,
+                                          void *buf, size_t nbytes) {
+    
+    // 获取源地址信息
+    char from_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &src_addr.sin_addr, from_ip, sizeof(from_ip));
+    int from_port = ntohs(src_addr.sin_port);
+    
+    std::cout << "Received RDMA metadata from " << from_ip << ":" << from_port << std::endl;
+    
+    // 1. 解析RDMA元数据
+    RDMA_Metadata metadata;
+    
+    try {
+        metadata.deserialize(reinterpret_cast<const uint8_t*>(temp_buf));
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to parse RDMA metadata: " << e.what() << std::endl;
+        // 如果不是有效的RDMA元数据，可能是普通的UDP数据
+        // 这里可以回退到普通UDP处理，但根据设计假设，UDP数据都是RDMA元数据
+        return -1;
+    }
+    
+    // 打印GID（十六进制格式）
+    std::string gid_str;
+    for (int i = 0; i < 16; i++) {
+        char buf_hex[3];
+        snprintf(buf_hex, sizeof(buf_hex), "%02x", metadata.gid[i]);
+        gid_str += buf_hex;
+        if (i % 2 == 1 && i != 15) gid_str += ":";
+    }
+    
+    std::cout << "RDMA metadata details:" << std::endl;
+    std::cout << "  QPN: " << metadata.qpn << std::endl;
+    std::cout << "  GID: " << gid_str << std::endl;
+    std::cout << "  QKey: " << metadata.qkey << std::endl;
+    std::cout << "  Port: " << static_cast<int>(metadata.port_num) << std::endl;
+    
+
+    // 2. 检查是否已经保存过这个对端
+    auto& peer_manager = GlobalPeerManager::instance();
+    const PeerInfo* existing_peer = peer_manager.get_peer(from_ip, from_port);
+    
+    if (!existing_peer) {
+        // 第一次收到这个对端的元数据
+        std::cout << "New peer detected, adding to peer list..." << std::endl;
+        
+        // 获取PD（保护域），假设可以从rdma_manager获取
+        ibv_pd* pd = m_rdma_manager.getPd();  // 需要UDRdmaManager添加这个方法
+        
+        // 保存对端信息
+        peer_manager.add_peer(from_ip, from_port, metadata, pd);
+        existing_peer = peer_manager.get_peer(from_ip, from_port);
+        
+        if (!existing_peer) {
+            std::cerr << "Failed to add peer to list" << std::endl;
+            return -1;
+        }
+        
+        // 为对端创建AH（地址句柄）
+        std::cout << "Creating AH for peer..." << std::endl;
+
+        // 使用port_num而不是qkey
+        ibv_ah* ah = peer_manager.get_or_create_ah(from_ip, from_port, pd, metadata.port_num);
+        if (!ah) {
+            std::cerr << "Failed to create AH for peer" << std::endl;
+        } else {
+            std::cout << "AH created successfully" << std::endl;
+        }
+        
+        // 3. 发送本地的RDMA元数据作为回复
+        std::cout << "Sending local RDMA metadata as reply..." << std::endl;
+        
+        RDMA_Metadata local_metadata;
+        local_metadata.qpn = m_rdma_manager.getQpNum();
+        local_metadata.port_num = m_rdma_manager.getPortNum();
+        local_metadata.qkey = m_rdma_manager.getQkey();
+        // 获取本地GID
+        m_rdma_manager.getGid(local_metadata.gid);  // 需要UDRdmaManager添加这个方法
+        
+        // 序列化本地元数据
+        char reply_buffer[RDMA_Metadata::serialized_size()];
+        try {
+            local_metadata.serialize(reinterpret_cast<uint8_t*>(reply_buffer));
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to serialize local RDMA metadata: " << e.what() << std::endl;
+            return -1;
+        }
+        
+        // 通过UDP发送回复
+        ssize_t send_result = orig_os_api.sendto(m_fd, reply_buffer, sizeof(reply_buffer), 0,
+                                       (sockaddr*)&src_addr, src_len);
+        
+        if (send_result < 0) {
+            std::cerr << "Failed to send RDMA metadata reply: " << strerror(errno) << std::endl;
+            return -1;
+        }
+        
+        // 打印GID（十六进制格式）
+        std::string local_gid_str;
+        for (int i = 0; i < 16; i++) {
+            char buf_hex[3];
+            snprintf(buf_hex, sizeof(buf_hex), "%02x", local_metadata.gid[i]);
+            local_gid_str += buf_hex;
+            if (i % 2 == 1 && i != 15) local_gid_str += ":";
+        }
+        
+        std::cout << "Local RDMA metadata sent successfully" << std::endl;
+        std::cout << "Local metadata details:" << std::endl;
+        std::cout << "  QPN: " << local_metadata.qpn << std::endl;
+        std::cout << "  GID: " << local_gid_str << std::endl;
+        std::cout << "  QKey: " << local_metadata.qkey << std::endl;
+        std::cout << "  Port: " << static_cast<int>(local_metadata.port_num) << std::endl;
+        
+        // 4. 发送回复后，立即轮询RDMA CQ等待数据
+        // 对端在收到我们的元数据回复后，很可能会立即通过RDMA发送实际数据
+        std::cout << "Waiting for RDMA data from " << from_ip << ":" << from_port << " ..." << std::endl;
+        
+        const int RDMA_WAIT_MS = 3000; // 等待RDMA数据3秒
+        int rdma_wait_ms = 0;
+        
+        while (rdma_wait_ms < RDMA_WAIT_MS) {
+            // 轮询接收完成队列
+            int rdma_result = m_rdma_manager.pollRecvCompletionQueue(100); // 每次轮询100ms
+            
+            if (rdma_result > 0) {
+                // 有RDMA数据到达
+                std::cout << "Received RDMA data after metadata exchange!" << std::endl;
+                
+                // 处理RDMA数据
+                ssize_t data_len = handle_rdma_data(buf, nbytes, from_ip, from_port);
+                
+                if (data_len > 0) {
+                    // 成功接收到RDMA数据
+                    return data_len;
+                } else if (data_len == 0) {
+                    // 有数据但未处理
+                    std::cout << "RDMA data received but not processed" << std::endl;
+                    return 0;
+                } else {
+                    // 处理RDMA数据出错
+                    std::cerr << "Failed to process RDMA data" << std::endl;
+                    return -1;
+                }
+            } else if (rdma_result < 0) {
+                // RDMA轮询出错
+                std::cerr << "Error polling RDMA receive queue" << std::endl;
+                break;
+            }
+            
+            rdma_wait_ms += 100;
+            
+            // 每500ms输出一次等待状态
+            if (rdma_wait_ms % 500 == 0) {
+                std::cout << "Still waiting for RDMA data (" << rdma_wait_ms << "/" << RDMA_WAIT_MS << " ms)..." << std::endl;
+            }
+        }
+        
+        // 等待RDMA数据超时
+        std::cout << "Timeout waiting for RDMA data after metadata exchange" << std::endl;
+        std::cout << "RDMA metadata exchange completed with " << from_ip << ":" << from_port << std::endl;
+        
+    } else {
+        // 已经交换过元数据
+        std::cout << "Already have RDMA metadata from " << from_ip << ":" << from_port << std::endl;
+        
+        // 检查是否有待处理的RDMA数据
+        int rdma_result = m_rdma_manager.pollRecvCompletionQueue(0); // 非阻塞检查
+        
+        if (rdma_result > 0) {
+            std::cout << "Found pending RDMA data for this peer" << std::endl;
+            
+            // 处理RDMA数据
+            ssize_t data_len = handle_rdma_data(buf, nbytes, from_ip, from_port);
+            
+            if (data_len > 0) {
+                return data_len;
+            } else if (data_len == 0) {
+                return 0;
+            }
+        }
+        
+        std::cout << "No pending RDMA data for this peer" << std::endl;
+    }
+    
+    // 5. 返回0表示元数据交换完成（成功或重复）
+    return 0;
+}
+
+
+// 单例实例
+GlobalPeerManager& GlobalPeerManager::instance() {
+    static GlobalPeerManager manager;
+    return manager;
+}
+
+// 私有构造函数
+GlobalPeerManager::GlobalPeerManager() {
+    std::cout << "[PeerManager] Global peer manager initialized" << std::endl;
+}
+
+// 析构函数
+GlobalPeerManager::~GlobalPeerManager() {
+    cleanup();
+    std::cout << "[PeerManager] Global peer manager destroyed" << std::endl;
+}
+
+// 添加对端信息
+bool GlobalPeerManager::add_peer(const std::string& ip, uint16_t port, 
+                                 const RDMA_Metadata& metadata, ibv_pd* pd) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::string key = make_peer_key(ip, port);
+    
+    // 检查是否已存在
+    auto it = peer_map_.find(key);
+    if (it != peer_map_.end()) {
+        // 已存在，更新元数据
+        std::cout << "[PeerManager] Peer already exists, updating: " << key << std::endl;
+        it->second.metadata = metadata;
+        if (pd != nullptr) {
+            it->second.pd = pd;
+        }
+        return true;
+    }
+    
+    // 创建新的对端信息
+    PeerInfo peer;
+    peer.ip = ip;
+    peer.port = port;
+    peer.metadata = metadata;
+    peer.pd = pd;
+    peer.ah = nullptr;  // 延迟创建AH
+    
+    // 添加到映射表
+    peer_map_[key] = peer;
+    
+    // 打印GID（十六进制格式）
+    std::string gid_str;
+    for (int i = 0; i < 16; i++) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", metadata.gid[i]);
+        gid_str += buf;
+        if (i % 2 == 1 && i != 15) gid_str += ":";
+    }
+    
+    std::cout << "[PeerManager] Added peer: " << key 
+              << " (QPN: " << metadata.qpn 
+              << ", GID: " << gid_str
+              << ", Port: " << static_cast<int>(metadata.port_num) 
+              << ")" << std::endl;
+    
+    return true;
+}
+
+// 更新对端信息
+bool GlobalPeerManager::update_peer(const std::string& ip, uint16_t port, 
+                                    const RDMA_Metadata& metadata) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::string key = make_peer_key(ip, port);
+    auto it = peer_map_.find(key);
+    
+    if (it == peer_map_.end()) {
+        std::cerr << "[PeerManager] Peer not found: " << key << std::endl;
+        return false;
+    }
+    
+    // 如果AH已经存在，并且元数据有变化，需要重新创建AH
+    bool need_recreate_ah = false;
+    if (it->second.ah != nullptr) {
+        // 比较GID是否变化
+        bool gid_changed = false;
+        for (int i = 0; i < 16; i++) {
+            if (it->second.metadata.gid[i] != metadata.gid[i]) {
+                gid_changed = true;
+                break;
+            }
+        }
+        
+        if (gid_changed ||
+            it->second.metadata.port_num != metadata.port_num ||
+            it->second.metadata.qkey != metadata.qkey) {
+            need_recreate_ah = true;
+        }
+    }
+    
+    // 更新元数据
+    it->second.metadata = metadata;
+    
+    // 如果需要，重新创建AH
+    if (need_recreate_ah && it->second.pd != nullptr) {
+        // 销毁旧的AH
+        destroy_ah(it->second.ah);
+        
+        // 创建新的AH
+        it->second.ah = create_ah(it->second, it->second.pd, metadata.port_num);
+        
+        std::cout << "[PeerManager] Recreated AH for peer: " << key << std::endl;
+    }
+    
+    std::cout << "[PeerManager] Updated peer: " << key 
+              << " (QPN: " << metadata.qpn << ")" << std::endl;
+    
+    return true;
+}
+
+// 移除对端
+bool GlobalPeerManager::remove_peer(const std::string& ip, uint16_t port) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::string key = make_peer_key(ip, port);
+    auto it = peer_map_.find(key);
+    
+    if (it == peer_map_.end()) {
+        return false;
+    }
+    
+    // 销毁地址句柄
+    if (it->second.ah != nullptr) {
+        destroy_ah(it->second.ah);
+    }
+    
+    // 从映射表中移除
+    peer_map_.erase(it);
+    
+    std::cout << "[PeerManager] Removed peer: " << key << std::endl;
+    
+    return true;
+}
+
+// 获取对端信息
+const PeerInfo* GlobalPeerManager::get_peer(const std::string& ip, uint16_t port) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::string key = make_peer_key(ip, port);
+    auto it = peer_map_.find(key);
+    
+    return (it != peer_map_.end()) ? &(it->second) : nullptr;
+}
+
+// 获取对端的地址句柄（如果不存在则创建）
+ibv_ah* GlobalPeerManager::get_or_create_ah(const std::string& ip, uint16_t port, 
+                                            ibv_pd* pd, uint8_t port_num) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::string key = make_peer_key(ip, port);
+    auto it = peer_map_.find(key);
+    
+    if (it == peer_map_.end()) {
+        std::cerr << "[PeerManager] Peer not found: " << key << std::endl;
+        return nullptr;
+    }
+    
+    PeerInfo& peer = it->second;
+    
+    // 如果AH已经存在，直接返回
+    if (peer.ah != nullptr) {
+        return peer.ah;
+    }
+    
+    // 如果没有PD信息，使用传入的PD
+    if (peer.pd == nullptr && pd != nullptr) {
+        peer.pd = pd;
+    }
+    
+    // 使用指定的端口号（如果提供了的话）
+    if (port_num != 1 && peer.metadata.port_num == 1) {
+        peer.metadata.port_num = port_num;
+    }
+    
+    // 检查PD是否有效
+    if (peer.pd == nullptr) {
+        std::cerr << "[PeerManager] Cannot create AH: PD is null for peer " 
+                  << key << std::endl;
+        return nullptr;
+    }
+    
+    // 创建AH
+    peer.ah = create_ah(peer, peer.pd, peer.metadata.port_num);
+    
+    if (peer.ah != nullptr) {
+        std::cout << "[PeerManager] Created AH for peer: " << key 
+                  << " using PD: " << peer.pd << std::endl;
+    }
+    
+    return peer.ah;
+}
+
+// 检查对端是否存在
+bool GlobalPeerManager::has_peer(const std::string& ip, uint16_t port) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::string key = make_peer_key(ip, port);
+    return peer_map_.find(key) != peer_map_.end();
+}
+
+// 获取对端数量
+size_t GlobalPeerManager::get_peer_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return peer_map_.size();
+}
+
+// 打印所有对端信息
+void GlobalPeerManager::print_all_peers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::cout << "\n[PeerManager] All Peers (" << peer_map_.size() << "):" << std::endl;
+    std::cout << "=========================================" << std::endl;
+    
+    for (const auto& pair : peer_map_) {
+        const PeerInfo& peer = pair.second;
+        const RDMA_Metadata& metadata = peer.metadata;
+        
+        std::cout << "  " << peer.ip << ":" << peer.port << std::endl;
+        std::cout << "    QPN: " << metadata.qpn << std::endl;
+        
+        // 打印GID（十六进制格式）
+        std::cout << "    GID: ";
+        for (int i = 0; i < 16; i++) {
+            std::cout << std::hex << std::setw(2) << std::setfill('0') 
+                     << static_cast<int>(metadata.gid[i]);
+            if (i % 2 == 1 && i != 15) std::cout << ":";
+        }
+        std::cout << std::dec << std::endl;
+        
+        std::cout << "    Port: " << static_cast<int>(metadata.port_num) << std::endl;
+        std::cout << "    QKey: 0x" << std::hex << metadata.qkey << std::dec << std::endl;
+        std::cout << "    AH: " << peer.ah << std::endl;
+        std::cout << "    PD: " << peer.pd << std::endl;
+        std::cout << "-----------------------------------------" << std::endl;
+    }
+}
+
+// 清理指定PD创建的所有AH
+void GlobalPeerManager::cleanup_pd_ahs(ibv_pd* pd) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (pd == nullptr) {
+        return;
+    }
+    
+    size_t destroyed_count = 0;
+    
+    for (auto& pair : peer_map_) {
+        PeerInfo& peer = pair.second;
+        
+        // 如果这个对端的AH是由指定的PD创建的，销毁它
+        if (peer.ah != nullptr && peer.pd == pd) {
+            destroy_ah(peer.ah);
+            peer.ah = nullptr;
+            destroyed_count++;
+        }
+    }
+    
+    std::cout << "[PeerManager] Cleaned up " << destroyed_count 
+              << " AHs for PD: " << pd << std::endl;
+}
+
+// 清理所有资源
+void GlobalPeerManager::cleanup() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    size_t destroyed_count = 0;
+    
+    // 销毁所有地址句柄
+    for (auto& pair : peer_map_) {
+        PeerInfo& peer = pair.second;
+        
+        if (peer.ah != nullptr) {
+            destroy_ah(peer.ah);
+            peer.ah = nullptr;
+            destroyed_count++;
+        }
+    }
+    
+    // 清空映射表
+    peer_map_.clear();
+    
+    std::cout << "[PeerManager] Cleaned up " << destroyed_count 
+              << " AHs and removed all peers" << std::endl;
+}
+
+// 生成对端键
+std::string GlobalPeerManager::make_peer_key(const std::string& ip, uint16_t port) {
+    return ip + ":" + std::to_string(port);
+}
+
+// 创建地址句柄（基于RoCE GID）
+ibv_ah* GlobalPeerManager::create_ah(const PeerInfo& peer, ibv_pd* pd, uint8_t port_num) {
+    if (pd == nullptr) {
+        std::cerr << "[PeerManager] Cannot create AH: PD is null for peer " 
+                  << peer.ip << ":" << peer.port << std::endl;
+        return nullptr;
+    }
+    
+    // 检查GID是否全为0
+    bool gid_all_zero = true;
+    for (int i = 0; i < 16; i++) {
+        if (peer.metadata.gid[i] != 0) {
+            gid_all_zero = false;
+            break;
+        }
+    }
+    
+    if (gid_all_zero) {
+        std::cerr << "[PeerManager] Cannot create AH: GID is all zeros for peer " 
+                  << peer.ip << ":" << peer.port << std::endl;
+        return nullptr;
+    }
+    
+    // 准备AH属性
+    ibv_ah_attr ah_attr;
+    memset(&ah_attr, 0, sizeof(ah_attr));
+    
+    // 对于RoCE网络，需要设置全局路由
+    ah_attr.is_global = 1;  // 启用全局路由
+    ah_attr.grh.hop_limit = 1;  // TTL值
+    ah_attr.grh.sgid_index = 4;  // 源GID索引
+    
+    // 设置目标GID
+    memcpy(ah_attr.grh.dgid.raw, peer.metadata.gid, 16);
+    
+    // 设置其他属性
+    ah_attr.dlid = 0;  // 对于RoCE v2，DLID为0
+    ah_attr.sl = 0;    // 服务级别，默认为0
+    ah_attr.src_path_bits = 0;
+    ah_attr.port_num = port_num;
+    ah_attr.grh.flow_label = 0;  // 流标签
+    
+    // 创建AH
+    ibv_ah* ah = ibv_create_ah(pd, &ah_attr);
+    
+    if (ah == nullptr) {
+        std::cerr << "[PeerManager] Failed to create AH for peer: " 
+                  << peer.ip << ":" << peer.port 
+                  << " (Port: " << static_cast<int>(port_num) 
+                  << ")" << std::endl;
+        // 打印GID以便调试
+        std::cerr << "  GID: ";
+        for (int i = 0; i < 16; i++) {
+            std::cerr << std::hex << std::setw(2) << std::setfill('0') 
+                     << static_cast<int>(peer.metadata.gid[i]);
+            if (i % 2 == 1 && i != 15) std::cerr << ":";
+        }
+        std::cerr << std::dec << std::endl;
+    } else {
+        std::cout << "[PeerManager] Created AH for peer: " 
+                  << peer.ip << ":" << peer.port << std::endl;
+    }
+    
+    return ah;
+}
+
+// 销毁地址句柄
+void GlobalPeerManager::destroy_ah(ibv_ah* ah) {
+    if (ah != nullptr) {
+        ibv_destroy_ah(ah);
+    }
 }
 
 // zc add

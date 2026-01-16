@@ -699,7 +699,7 @@ My_fd_collection::~My_fd_collection() {
     clear();
 }
 
-int My_fd_collection::add_socketfd(int fd) {
+int My_fd_collection::add_socketfd(int fd, int __type) {
     if (fd < 0) {
         return -1; // 无效的文件描述符
     }
@@ -710,16 +710,31 @@ int My_fd_collection::add_socketfd(int fd) {
     }
     
     try {
-        // 创建新的Sockfd_tcp实例
-        Sockfd_tcp* sockfd = new Sockfd_tcp(fd);
-        m_fd_map[fd] = sockfd;
-        return 1; // 成功
+
+		int sock_type = __type & 0xf;
+
+		if(sock_type == SOCK_STREAM){
+			// 创建新的Socket_transbridge实例
+        	Socket_tb_tcp* sockfd = new Socket_tb_tcp(fd);
+        	m_fd_map[fd] = sockfd;
+        	return 1; // 成功
+		}
+		else if(sock_type == SOCK_DGRAM){
+			// 创建新的Socket_transbridge实例
+	        Socket_tb_udp* sockfd = new Socket_tb_udp(fd);
+    	    m_fd_map[fd] = sockfd;
+        	return 1; // 成功
+		}
+		else{
+			printf("something wrong happen add false socket fd\n");
+			return -3;
+		}
     } catch (const std::exception& e) {
         return -3; // 创建失败
     }
 }
 
-Sockfd_tcp* My_fd_collection::find_socketfd(int fd) {
+Socket_transbridge* My_fd_collection::find_socketfd(int fd) {
     auto it = m_fd_map.find(fd);
     if (it != m_fd_map.end()) {
         return it->second;
@@ -733,7 +748,7 @@ bool My_fd_collection::remove_socketfd(int fd) {
         // 关闭socket
         //close(fd);
         
-        // 删除Sockfd_tcp实例
+        // 删除Socket_transbridge实例
         delete it->second;
         
         // 从map中移除
@@ -752,7 +767,7 @@ void My_fd_collection::clear() {
         // 关闭socket
         //close(pair.first);
         
-        // 删除Sockfd_tcp实例
+        // 删除Socket_transbridge实例
         delete pair.second;
     }
     m_fd_map.clear();

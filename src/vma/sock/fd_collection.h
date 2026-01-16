@@ -79,11 +79,11 @@ public:
     My_fd_collection();
     ~My_fd_collection();
 
-    // 添加socket文件描述符到集合
-    int add_socketfd(int fd);
+    // 添加socket文件描述符到集合,要根据tcp还是udp区分开
+    int add_socketfd(int fd,, int __type);
     
-    // 根据fd查找对应的Sockfd_tcp实例
-    Sockfd_tcp* find_socketfd(int fd);
+    // 根据fd查找对应的Socket_transbridge实例
+    Socket_transbridge* find_socketfd(int fd);
     
     // 从集合中移除并关闭socket
     bool remove_socketfd(int fd);
@@ -95,8 +95,8 @@ public:
     void clear();
 
 private:
-    // 使用map存储fd到Sockfd_tcp指针的映射
-    std::unordered_map<int, Sockfd_tcp*> m_fd_map;
+    // 使用map存储fd到Socket_transbridge指针的映射
+    std::unordered_map<int, Socket_transbridge*> m_fd_map;
 };
 
 
@@ -322,7 +322,7 @@ inline int fd_collection::get_fd_map_size()
 // zc add
 extern My_fd_collection* my_g_p_fd_collection;
 
-inline Sockfd_tcp* my_fd_collection_get_sockfd(int fd)
+inline Socket_transbridge* my_fd_collection_get_sockfd(int fd)
 {
 	if (my_g_p_fd_collection) 
 		return my_g_p_fd_collection->find_socketfd(fd);

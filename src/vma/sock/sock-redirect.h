@@ -90,53 +90,422 @@ const char* sprintf_fdset(char* buf, int buflen, int __nfds, fd_set *__fds);
 
 
 // zc add
+class Socket_transbridge{
 
-class Sockfd_tcp{
+	// Socket类型枚举
+    enum SocketType {
+        SOCKET_TYPE_TCP = 0,
+        SOCKET_TYPE_UDP = 1
+    };
+
+
+	Socket_transbridge(int fd);
+    virtual ~Socket_transbridge();
+
+    // 通用接口
+    virtual int socket() = 0;
+    virtual int close();
+    virtual int setsockopt(int level, int optname, const void *optval, socklen_t optlen);
+    virtual int getsockopt(int level, int optname, void *optval, socklen_t *optlen);
+    
+    // 地址绑定
+    virtual int bind(const sockaddr *addr, socklen_t addrlen);
+    void extractAddressFromSockaddr(const sockaddr *addr, socklen_t addrlen) {
+        if (addr == nullptr) return;
+        
+        char ip_str[INET6_ADDRSTRLEN] = {0};
+        
+        if (addr->sa_family == AF_INET) {
+            // IPv4地址
+            struct sockaddr_in *addr_in = (struct sockaddr_in *)addr;
+            inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+            m_bind_port = ntohs(addr_in->sin_port);
+        } else if (addr->sa_family == AF_INET6) {
+            // IPv6地址
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)addr;
+            inet_ntop(AF_INET6, &(addr_in6->sin6_addr), ip_str, INET6_ADDRSTRLEN);
+            m_bind_port = ntohs(addr_in6->sin6_port);
+        } else {
+            // 未知地址族
+            m_bind_ip.clear();
+            m_bind_port = 0;
+            return;
+        }
+        
+        m_bind_ip = ip_str;
+    }
+
+    bool isBound() const { return m_isBound; }
+
+    // 获取socket描述符
+    int getFd() const { return m_fd; }
+    
+    // 设置非阻塞模式
+    virtual int setNonBlocking(bool nonblocking);
+
+	// 获取socket类型（返回枚举值）
+    SocketType getType() const { return m_type; }
+
+
+protected:
+    int m_fd;
+	SocketType m_type;  // socket类型
+
+    // 绑定的IP地址和端口号
+    std::string m_bind_ip;   // 绑定的IP地址
+    uint16_t m_bind_port;    // 绑定的端口号
+    bool m_isBound;          // 是否已绑定地址
+
+	void setType(SocketType type) { m_type = type; }  // 保护方法，子类可调用
+
+}
+
+class Socket_tb_tcp : public Socket_transbridge{
 public:
-	Sockfd_tcp(int fd);
-	virtual ~Sockfd_tcp();
+	
+	Socket_tb_tcp(int fd);
+	virtual ~Socket_tb_tcp();
 
-	//
-
-
-	int socket();
-	int accept();
-	int connect();
-	int listen(int backlog);
-	int bind(const sockaddr *__addr, socklen_t __addrlen);
-	ssize_t send(__const void *__buf, size_t __nbytes, int __flags);
-	ssize_t recv(void *__buf, size_t __nbytes, int __flags);
-	//int send();
-
-	ssize_t write( __const void *__buf, size_t __nbytes);
-	ssize_t read( void *__buf, size_t __nbytes);
-
-	ssize_t rx(void *__buf, size_t __nbytes, int __flags);
-	ssize_t tx(__const void *__buf, size_t __nbytes, int __flags);
+	// TCP特定操作
+    int socket();
+    int listen(int backlog);
+    TcpSocket* accept();
+    int connect();
+    int bind(const sockaddr *addr, socklen_t addrlen);
 
 
+    // 数据收发
+    ssize_t send(__const void *__buf, size_t __nbytes, int __flags);
+    ssize_t recv(void *buf, size_t nbytes, int flags = 0);
+    
+    // 便捷读写接口
+    ssize_t write(__const void *__buf, size_t __nbytes);
+    ssize_t read(void *buf, size_t nbytes);
+    
+    // 带缓冲的收发
+    ssize_t rx(void *buf, size_t nbytes, int flags = 0);
+    ssize_t tx(__const void *__buf, size_t __nbytes, int __flags);
+    
+    // TCP特有选项设置
+    int setKeepAlive(bool enable, int idle = 60, int interval = 10, int count = 5);
+    int setNoDelay(bool enable);  // 禁用Nagle算法
+    
+    // 设置绑定的IP地址和端口号
+    void setBindAddress(const std::string& ip, uint16_t port) {
+        m_bind_ip = ip;
+        m_bind_port = port;
+    }
+
+    // 判断是否已绑定地址
+    bool isBound() const { return !m_bind_ip.empty() && m_bind_port != 0; }
+
+    // 状态查询
+    bool isListening() const { return m_isListening; }
+    bool isConnected() const { return m_isConnected; }
+    
+    // 连接信息
+    int getLocalPort() const;
+    int getRemotePort() const;
+    std::string getLocalAddress() const;
+    std::string getRemoteAddress() const;
 
 private:
-	int m_fd;
-	int m_sorconn_key;// sor connection key 这里也使用fd来索引比较好吧？毕竟一个socket我们只让他对应一条sor conn，不过还是区分一下，值实际上就等于fd
-	//struct resources m_res;
-
-	bool islistenserver;// 判断是否是服务器，并且是否已经调用了listen进入监听状态
-	bool isconnected;// 判断是否已经建立好了sor连接
+    bool m_isListening;
+    bool m_isConnected;
 	int send_buffer_current;
 	int	recv_buffer_current;
 
+    // 绑定的IP地址和端口号
+    std::string m_bind_ip;   // 绑定的IP地址
+    uint16_t m_bind_port;    // 绑定的端口号
+    
+    // 连接信息缓存
+    sockaddr_in m_localAddr;
+    sockaddr_in m_remoteAddr;
+    bool m_addrCached;
 
+}
+
+class Socket_tb_udp : public Socket_transbridge{
+public:
+
+	Socket_tb_udp(int fd);
+	virtual ~Socket_tb_udp();
+ // UDP特定操作
+    int socket();
+    
+    int bind();
+
+    // UDP连接（伪连接，设置默认目标地址）
+    int connect(const sockaddr *addr, socklen_t addrlen);
+    int disconnect();  // 断开伪连接
+    
+    // UDP数据收发
+    ssize_t sendto(__const void *__buf, size_t __nbytes, int __flags,
+	       const struct sockaddr *__to, socklen_t __tolen);
+    //note !! sendto sendmsg类似的中，都默认了bind的操作，如果这个套接字没有和某个ip地址和端口绑定的话，此时会默认绑定
+    
+    ssize_t recvfrom(void *buf, size_t nbytes, int flags,
+                     sockaddr *srcAddr, socklen_t *addrlen);
+    
+    bool establish_rdma_connection(const char* remote_ip, int remote_port,
+                                 const struct sockaddr* to_addr);
+                                    
+    void updateRdmaLocalAddress(uint32_t new_ip, uint16_t new_port);
+
+    bool send_metadata(int sockfd, const sockaddr* to, socklen_t tolen);
+    bool receive_metadata(int sockfd, sockaddr* from, socklen_t* fromlen, RDMA_Metadata& metadata);
+
+    bool post_send_to_peer(PeerInfo* peer, size_t data_len);
+
+    ssize_t handle_udp_metadata(char* temp_buf, ssize_t recv_len,
+                                sockaddr_in& src_addr, socklen_t src_len,
+                                void *buf, size_t nbytes)
+
+    // 连接模式下的收发（使用connect设置默认地址后）
+    ssize_t send(const void *buf, size_t nbytes, int flags = 0);
+    ssize_t recv(void *buf, size_t nbytes, int flags = 0);
+    
+    // 广播和多播支持
+    int setBroadcast(bool enable);
+    int joinMulticastGroup(const char* multicastAddr, const char* localAddr = nullptr);
+    int leaveMulticastGroup(const char* multicastAddr);
+    
+    // UDP特有选项
+    int setReuseAddr(bool enable);
+    int setMulticastTTL(int ttl);
+    int setMulticastLoop(bool enable);
+    
+    // 接收超时设置
+    int setRecvTimeout(int seconds, int microseconds = 0);
+
+    // RDMA管理器 - 每个socket管理自己的RDMA资源
+    UDRdmaManager m_rdma_manager;
+
+private:
+    bool m_isConnected;  // 是否设置了默认目标地址
+    bool m_broadcastEnabled;
+    
+    // 默认目标地址（用于connect模式）
+    sockaddr_in m_defaultDestAddr;
+
+    // 初始化RDMA管理器
+    bool initRdmaManager(uint32_t local_ip, uint16_t local_port, int sockfd);
+
+    bool isbound;
+
+    ibv_pd* m_pd;  // 保护域指针
+
+}
+
+// RDMA元数据结构（使用gid不需要lid）
+struct RDMA_Metadata {
+    uint32_t qpn;                   // QP号
+    uint8_t gid[16];                // GID（RoCE网络使用）
+    uint8_t port_num;               // 端口号
+    uint32_t qkey;                  // QKEY
+    
+    RDMA_Metadata() 
+        : qpn(0), port_num(1), qkey(0x111111) {
+        memset(gid, 0, sizeof(gid));  // 初始化GID为0
+    }
+    
+    // 序列化（用于网络传输）
+    void serialize(uint8_t* buffer) const {
+        // 序列化qpn
+        *reinterpret_cast<uint32_t*>(buffer) = qpn;
+        
+        // 序列化gid（16字节）
+        memcpy(buffer + 4, gid, 16);
+        
+        // 序列化port_num
+        *(buffer + 20) = port_num;
+        
+        // 序列化qkey
+        *reinterpret_cast<uint32_t*>(buffer + 21) = qkey;
+    }
+    
+    // 反序列化（用于从网络接收）
+    void deserialize(const uint8_t* buffer) {
+        // 反序列化qpn
+        qpn = *reinterpret_cast<const uint32_t*>(buffer);
+        
+        // 反序列化gid
+        memcpy(gid, buffer + 4, 16);
+        
+        // 反序列化port_num
+        port_num = *(buffer + 20);
+        
+        // 反序列化qkey
+        qkey = *reinterpret_cast<const uint32_t*>(buffer + 21);
+    }
+    
+    // 获取序列化后的字节数
+    static constexpr size_t serialized_size() {
+        return sizeof(uint32_t) +  // qpn
+               16 +                // gid (16 bytes)
+               1 +                 // port_num (uint8_t)
+               sizeof(uint32_t);   // qkey
+    }
+    
+    // 打印元数据信息
+    void print() const {
+        std::cout << "RDMA Metadata (RoCE):" << std::endl;
+        std::cout << "  QPN: " << qpn << std::endl;
+        
+        // 打印GID（十六进制格式）
+        std::cout << "  GID: ";
+        for (int i = 0; i < 16; i++) {
+            std::cout << std::hex << std::setw(2) << std::setfill('0') 
+                     << static_cast<int>(gid[i]);
+            if (i % 2 == 1 && i != 15) std::cout << ":";
+        }
+        std::cout << std::dec << std::endl;
+        
+        std::cout << "  Port: " << static_cast<int>(port_num) << std::endl;
+        std::cout << "  QKey: 0x" << std::hex << qkey << std::dec << std::endl;
+    }
+};
+
+
+// 全局对端管理器 - 单例模式
+class GlobalPeerManager {
+public:
+    // 删除拷贝构造函数和赋值操作符
+    GlobalPeerManager(const GlobalPeerManager&) = delete;
+    GlobalPeerManager& operator=(const GlobalPeerManager&) = delete;
+    
+    // 获取单例实例
+    static GlobalPeerManager& instance();
+    
+    // ============ 对端管理 ============
+    // 添加对端信息
+    bool add_peer(const std::string& ip, uint16_t port, 
+                  const RDMA_Metadata& metadata, ibv_pd* pd = nullptr);
+    
+    // 更新对端信息
+    bool update_peer(const std::string& ip, uint16_t port, 
+                     const RDMA_Metadata& metadata);
+    
+    // 移除对端
+    bool remove_peer(const std::string& ip, uint16_t port);
+    
+    // 获取对端信息
+    const PeerInfo* get_peer(const std::string& ip, uint16_t port) const;
+    
+    // 获取对端的地址句柄（如果不存在则创建）
+    ibv_ah* get_or_create_ah(const std::string& ip, uint16_t port, 
+                             ibv_pd* pd, uint32_t qkey = 0x111111);
+    
+    // 检查对端是否存在
+    bool has_peer(const std::string& ip, uint16_t port) const;
+    
+    // 获取对端数量
+    size_t get_peer_count() const;
+    
+    // 打印所有对端信息
+    void print_all_peers() const;
+    
+    // 清理指定PD创建的所有AH
+    void cleanup_pd_ahs(ibv_pd* pd);
+    
+    // 清理所有资源
+    void cleanup();
+    
+    // ============ 工具函数 ============
+    // 生成对端键
+    static std::string make_peer_key(const std::string& ip, uint16_t port);
+    
+private:
+    // 私有构造函数和析构函数
+    GlobalPeerManager();
+    ~GlobalPeerManager();
+    
+    // 创建地址句柄
+    ibv_ah* create_ah(const PeerInfo& peer, ibv_pd* pd, uint32_t qkey);
+    
+    // 销毁地址句柄
+    void destroy_ah(ibv_ah* ah);
+    
+private:
+    // 对端信息映射表
+    std::unordered_map<std::string, PeerInfo> peer_map_;
+    
+    // 互斥锁，保护对端映射表
+    mutable std::mutex mutex_;
 };
 
 
 
+// 全局对端管理器 - 单例模式
+class GlobalPeerManager {
+public:
+    // 删除拷贝构造函数和赋值操作符
+    GlobalPeerManager(const GlobalPeerManager&) = delete;
+    GlobalPeerManager& operator=(const GlobalPeerManager&) = delete;
+    
+    // 获取单例实例
+    static GlobalPeerManager& instance();
+    
+    // ============ 对端管理 ============
+    // 添加对端信息
+    bool add_peer(const std::string& ip, uint16_t port, 
+                  const RDMA_Metadata& metadata, ibv_pd* pd = nullptr);
+    
+    // 更新对端信息
+    bool update_peer(const std::string& ip, uint16_t port, 
+                     const RDMA_Metadata& metadata);
+    
+    // 移除对端
+    bool remove_peer(const std::string& ip, uint16_t port);
+    
+    // 获取对端信息
+    const PeerInfo* get_peer(const std::string& ip, uint16_t port) const;
+    
+    // 获取对端的地址句柄（如果不存在则创建）- 注意：现在基于GID创建AH
+    ibv_ah* get_or_create_ah(const std::string& ip, uint16_t port, 
+                             ibv_pd* pd, uint8_t port_num = 1);
+    
+    // 检查对端是否存在
+    bool has_peer(const std::string& ip, uint16_t port) const;
+    
+    // 获取对端数量
+    size_t get_peer_count() const;
+    
+    // 打印所有对端信息
+    void print_all_peers() const;
+    
+    // 清理指定PD创建的所有AH
+    void cleanup_pd_ahs(ibv_pd* pd);
+    
+    // 清理所有资源
+    void cleanup();
+    
+    // ============ 工具函数 ============
+    // 生成对端键
+    static std::string make_peer_key(const std::string& ip, uint16_t port);
+    
+private:
+    // 私有构造函数和析构函数
+    GlobalPeerManager();
+    ~GlobalPeerManager();
+    
+    // 创建地址句柄（基于RoCE GID）
+    ibv_ah* create_ah(const PeerInfo& peer, ibv_pd* pd, uint8_t port_num);
+    
+    // 销毁地址句柄
+    void destroy_ah(ibv_ah* ah);
+    
+private:
+    // 对端信息映射表
+    std::unordered_map<std::string, PeerInfo> peer_map_;
+    
+    // 互斥锁，保护对端映射表
+    mutable std::mutex mutex_;
+};
 
 
-
-
-
-/**
+/* *
  *-----------------------------------------------------------------------------
  *  variables to hold the function-pointers to original functions
  *-----------------------------------------------------------------------------
