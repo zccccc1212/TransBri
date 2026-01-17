@@ -3426,7 +3426,7 @@ int Socket_tb_udp::bind() {
         return result;
     }
 
-    extractAddressFromSockaddr(local_addr, local_len);
+    extractAddressFromSockaddr(local_addr);
 
     m_rdma_initialized = true;
     std::cout << "RDMA manager initialized successfully after bind" << std::endl;
@@ -3436,12 +3436,12 @@ int Socket_tb_udp::bind() {
 
 bool Socket_tb_udp::initRdmaManager(uint32_t local_ip, uint16_t local_port, int sockfd) {
     // 初始化RDMA管理器
-    if (!m_rdma_manager.initialize(local_ip, local_port, sockfd)) {
-        std::cerr << "Failed to initialize RDMA manager: " << m_rdma_manager.getLastError() << std::endl;
+    if (!m_rdma_manager->initialize(local_ip, local_port, sockfd)) {
+        std::cerr << "Failed to initialize RDMA manager: " << m_rdma_manager->getLastError() << std::endl;
         return false;
     }
 
-	m_pd = m_rdma_manager.getPd();  // 需要UDRdmaManager添加这个方法
+	m_pd = m_rdma_manager->getPd();  // 需要UDRdmaManager添加这个方法
     
     return true;
 }
@@ -3654,11 +3654,11 @@ bool Socket_tb_udp::establish_rdma_connection(const char* remote_ip, int remote_
 bool Socket_tb_udp::send_metadata(int sockfd, const sockaddr* to, socklen_t tolen) {
     // 获取本地RDMA元数据
     RDMA_Metadata local_metadata;
-    local_metadata.qpn = m_rdma_manager.getQpNum();
-    local_metadata.port_num = m_rdma_manager.getPortNum();
-    local_metadata.qkey = m_rdma_manager.getQkey();
+    local_metadata.qpn = m_rdma_manager->getQpNum();
+    local_metadata.port_num = m_rdma_manager->getPortNum();
+    local_metadata.qkey = m_rdma_manager->getQkey();
     // 获取本地GID
-    m_rdma_manager.getGid(local_metadata.gid);  // 需要UDRdmaManager添加这个方法
+    m_rdma_manager->getGid(local_metadata.gid);  // 需要UDRdmaManager添加这个方法
     
     // 序列化元数据
     char metadata_buffer[RDMA_Metadata::serialized_size()];
@@ -3934,7 +3934,7 @@ ssize_t Socket_tb_udp::handle_udp_metadata(char* temp_buf, ssize_t recv_len,
         std::cout << "New peer detected, adding to peer list..." << std::endl;
         
         // 获取PD（保护域），假设可以从rdma_manager获取
-        ibv_pd* pd = m_rdma_manager.getPd();  // 需要UDRdmaManager添加这个方法
+        ibv_pd* pd = m_rdma_manager->getPd();  // 需要UDRdmaManager添加这个方法
         
         // 保存对端信息
         peer_manager.add_peer(from_ip, from_port, metadata, pd);
@@ -3960,11 +3960,11 @@ ssize_t Socket_tb_udp::handle_udp_metadata(char* temp_buf, ssize_t recv_len,
         std::cout << "Sending local RDMA metadata as reply..." << std::endl;
         
         RDMA_Metadata local_metadata;
-        local_metadata.qpn = m_rdma_manager.getQpNum();
-        local_metadata.port_num = m_rdma_manager.getPortNum();
-        local_metadata.qkey = m_rdma_manager.getQkey();
+        local_metadata.qpn = m_rdma_manager->getQpNum();
+        local_metadata.port_num = m_rdma_manager->getPortNum();
+        local_metadata.qkey = m_rdma_manager->getQkey();
         // 获取本地GID
-        m_rdma_manager.getGid(local_metadata.gid);  // 需要UDRdmaManager添加这个方法
+        m_rdma_manager->getGid(local_metadata.gid);  // 需要UDRdmaManager添加这个方法
         
         // 序列化本地元数据
         char reply_buffer[RDMA_Metadata::serialized_size()];
@@ -4009,7 +4009,7 @@ ssize_t Socket_tb_udp::handle_udp_metadata(char* temp_buf, ssize_t recv_len,
         
         while (rdma_wait_ms < RDMA_WAIT_MS) {
             // 轮询接收完成队列
-            int rdma_result = m_rdma_manager.pollRecvCompletionQueue(100); // 每次轮询100ms
+            int rdma_result = m_rdma_manager->pollRecvCompletionQueue(100); // 每次轮询100ms
             
             if (rdma_result > 0) {
                 // 有RDMA数据到达
@@ -4053,7 +4053,7 @@ ssize_t Socket_tb_udp::handle_udp_metadata(char* temp_buf, ssize_t recv_len,
         std::cout << "Already have RDMA metadata from " << from_ip << ":" << from_port << std::endl;
         
         // 检查是否有待处理的RDMA数据
-        int rdma_result = m_rdma_manager.pollRecvCompletionQueue(0); // 非阻塞检查
+        int rdma_result = m_rdma_manager->pollRecvCompletionQueue(0); // 非阻塞检查
         
         if (rdma_result > 0) {
             std::cout << "Found pending RDMA data for this peer" << std::endl;
