@@ -1448,332 +1448,7 @@ private:
     }
 };
 
-
-// CQ管理器 - 单例模式，管理共享的完成队列
-class CQManager {
-public:
-    // 获取单例实例
-    static CQManager& getInstance();
-    
-    // 禁止拷贝和赋值
-    CQManager(const CQManager&) = delete;
-    CQManager& operator=(const CQManager&) = delete;
-    
-    // 创建共享的CQ
-    bool createSharedCQs(ibv_context* context, 
-                        uint32_t send_cq_size = 1024,
-                        uint32_t recv_cq_size = 1024,
-                        void* send_cq_context = nullptr,
-                        void* recv_cq_context = nullptr);
-    
-    // 获取共享CQ
-    ibv_cq* getSharedSendCq() const { return m_shared_send_cq; }
-    ibv_cq* getSharedRecvCq() const { return m_shared_recv_cq; }
-    
-    // 启动/停止轮询线程
-    void startPollingThreads();
-    void stopPollingThreads();
-    
-    // 注册/注销QP到CQ
-    bool registerQpToCq(ibv_qp* qp, const std::string& qp_name = "");
-    bool unregisterQpFromCq(ibv_qp* qp);
-    
-    // 设置完成事件回调
-    using CompletionCallback = std::function<void(ibv_wc& wc, const std::string& qp_name)>;
-    void setSendCompletionCallback(CompletionCallback callback);
-    void setRecvCompletionCallback(CompletionCallback callback);
-    
-    // 轮询接口
-    int pollSendCq(int timeout_ms = 0);
-    int pollRecvCq(int timeout_ms = 0);
-    
-    // 清理资源
-    void cleanup();
-    
-    // 统计信息结构体
-    struct CQStats {
-        uint64_t send_completions;
-        uint64_t recv_completions;
-        uint64_t send_errors;
-        uint64_t recv_errors;
-        size_t registered_qps;
-    };
-    
-    // 获取和打印统计信息
-    CQStats getStats() const;
-    void printStats() const;
-    
-private:
-    // 私有构造函数和析构函数
-    CQManager();
-    ~CQManager();
-    
-    // 轮询线程函数
-    void sendPollingThread();
-    void recvPollingThread();
-    
-    // 处理完成事件
-    void handleSendCompletion(ibv_wc& wc);
-    void handleRecvCompletion(ibv_wc& wc);
-    
-    // 查找QP名称
-    std::string findQpName(uint32_t qp_num) const;
-    
-    // 根据qp_num查找QP指针
-    ibv_qp* findQpByNum(uint32_t qp_num) const;
-    
-private:
-    // 共享的CQ
-    ibv_cq* m_shared_send_cq;
-    ibv_cq* m_shared_recv_cq;
-    
-    // 轮询线程
-    std::thread m_send_polling_thread;
-    std::thread m_recv_polling_thread;
-    std::atomic<bool> m_polling_stop;
-    
-    // QP映射表（用于在完成事件中识别QP）
-    std::unordered_map<ibv_qp*, std::string> m_qp_name_map;
-    mutable std::mutex m_qp_map_mutex;
-    
-    // 完成事件回调
-    CompletionCallback m_send_completion_callback;
-    CompletionCallback m_recv_completion_callback;
-    
-    // 统计信息
-    std::atomic<uint64_t> m_send_completions;
-    std::atomic<uint64_t> m_recv_completions;
-    std::atomic<uint64_t> m_send_errors;
-    std::atomic<uint64_t> m_recv_errors;
-    
-    // 同步原语
-    mutable std::mutex m_mutex;
-    mutable std::condition_variable m_cv;
-};
-
-//ud rdma qp
-// 简化的RDMA资源结构
-struct SimpleRdmaResources {
-    ibv_context* context = nullptr;      // 设备上下文
-    ibv_pd* pd = nullptr;                // 保护域
-    ibv_qp* qp = nullptr;                // 队列对（UD类型）
-    
-    // 内存区域
-    struct {
-        ibv_mr* send_mr = nullptr;       // 发送内存区域
-        ibv_mr* recv_mr = nullptr;       // 接收内存区域
-        void* send_buf = nullptr;        // 发送缓冲区
-        void* recv_buf = nullptr;        // 接收缓冲区
-        size_t send_size = 0;            // 发送缓冲区大小
-        size_t recv_size = 0;            // 接收缓冲区大小
-    } memory;
-    
-    // 设备信息
-    struct {
-        std::string name;
-        uint8_t port_num = 1;
-        uint16_t lid = 0;
-    } device;
-    
-    // UD特定参数
-    uint32_t qkey = 0x111111;
-    
-    // 共享CQ引用
-    ibv_cq* shared_send_cq = nullptr;
-    ibv_cq* shared_recv_cq = nullptr;
-};
-
-
-
-// 简化的RDMA管理器 - 单例模式，只管理一个UD QP
-
-
-// 一个进程一个qp，然后两个节点通信的时候，发现对面的ip地址有就可以直接发送到那个qp即可
-// 然后每个udp socket维护自己的ringbuffer
-// 同样有一个额外的轮询线程，这个轮询线程会负责一直轮询cq
-// 在发送数据包的时候会同时发送一个包头过去，这个包头在最前面，告诉对面这个包的源IP，目标IP，源port，目标port
-// 这一个数据包的长度用立即数来传
-// 所以在创建socket时就需要为每个socket根据ip地址和端口建立一个映射，方便后面查找
-// 当轮询线程轮循到某一个数据包时，就可以根据.
-
-// 不对，压根就不可行，轮询线程轮循到数据包时，只能通知那一个socket，但是他调用recvfrom时，都不知道数据从哪里取
-
-
-// 还是不可行，必须每个udp socket一个qp，自己管自己的
-class UDRdmaManager {
-public:
-    // 构造函数
-    UDRdmaManager(uint32_t local_ip, uint16_t local_port);
-    
-    // 析构函数
-    ~UDRdmaManager();
-    
-    // 禁止拷贝构造和拷贝赋值
-    UDRdmaManager(const UDRdmaManager&) = delete;
-    UDRdmaManager& operator=(const UDRdmaManager&) = delete;
-    
-    // 允许移动构造和移动赋值
-    UDRdmaManager(UDRdmaManager&& other) noexcept;
-    UDRdmaManager& operator=(UDRdmaManager&& other) noexcept;
-    
-    // 初始化RDMA资源
-    bool initialize(uint32_t local_ip, uint16_t local_port, int sockfd,
-                    size_t send_buffer_size = 1024,
-                    size_t recv_buffer_size = 1024,
-                    uint32_t max_send_wr = 1024,
-                    uint32_t max_recv_wr = 1024,
-                    uint32_t max_send_sge = 16,
-                    uint32_t max_recv_sge = 16);
-    
-    // 清理所有资源
-    void cleanup();
-    
-    // 检查是否已初始化
-    bool isInitialized() const { return m_initialized; }
-    
-    // ============ QP和资源获取 ============
-    ibv_qp* getQp() const { return m_resources.qp; }
-    ibv_pd* getPd() const { return m_resources.pd; }
-    ibv_context* getContext() const { return m_resources.context; }
-    
-    // 获取QP信息
-    uint32_t getQpNum() const { return m_resources.qp ? m_resources.qp->qp_num : 0; }
-    uint16_t getLid() const { return m_resources.device.lid; }
-    uint8_t getPortNum() const { return m_resources.device.port_num; }
-    uint32_t getQkey() const { return m_resources.qkey; }
-    
-    // ============ 缓冲区信息 ============
-    void* getSendBuffer() const { return m_resources.memory.send_buf; }
-    void* getRecvBuffer() const { return m_resources.memory.recv_buf; }
-    size_t getSendBufferSize() const { return m_resources.memory.send_size; }
-    size_t getRecvBufferSize() const { return m_resources.memory.recv_size; }
-    uint32_t getSendBufferLkey() const { 
-        return m_resources.memory.send_mr ? m_resources.memory.send_mr->lkey : 0; 
-    }
-    uint32_t getRecvBufferLkey() const { 
-        return m_resources.memory.recv_mr ? m_resources.memory.recv_mr->lkey : 0; 
-    }
-    
-    // ============ 地址句柄管理 ============
-    ibv_ah* createAddressHandle(uint16_t dest_lid, uint8_t dest_port_num = 1,
-                               uint32_t qkey = 0x111111, 
-                               uint8_t sl = 0, uint8_t src_path_bits = 0);
-    
-    void destroyAddressHandle(ibv_ah* ah);
-    
-    // 分配和注册内存区域
-    bool allocateAndRegisterMemory(uint32_t local_ip, uint16_t local_port, size_t send_block_count, size_t recv_block_count);
-    
-    // ============ SequentialUdpBuffer 管理 ============
-    // 获取发送缓冲区引用
-    SequentialUdpBuffer& send_buffer() { return *send_buffer_; }
-    const SequentialUdpBuffer& send_buffer() const { return *send_buffer_; }
-    
-    // 获取接收缓冲区引用
-    SequentialUdpBuffer& recv_buffer() { return *recv_buffer_; }
-    const SequentialUdpBuffer& recv_buffer() const { return *recv_buffer_; }
-    
-    // 获取MR信息
-    struct MemoryRegions {
-        ibv_mr* send_mr;
-        ibv_mr* recv_mr;
-        size_t send_size;
-        size_t recv_size;
-    };
-    
-    MemoryRegions get_memory_regions() const;
-    
-    // ============ 本地地址管理 ============
-    bool updateLocalAddress(uint32_t new_local_ip, uint16_t new_local_port);
-    
-    // ============ 接收缓冲区相关方法 ============
-    size_t post_recv(size_t n);
-    bool post_single_recv_internal();
-    
-    // ============ 共享CQ管理 ============
-    // 静态方法获取共享CQ
-    static ibv_cq* getSharedSendCq();
-    static ibv_cq* getSharedRecvCq();
-    
-    // 静态方法启动/停止轮询线程
-    static bool startPollingThreads();
-    static void stopPollingThreads();
-    
-    // 静态方法获取统计信息
-    static void printCqStats();
-    
-    // ============ 错误信息 ============
-    const char* getLastError() const { return m_errorMsg; }
-    
-    // ============ 调试信息 ============
-    void printInfo() const;
-    
-    // ============ 资源统计 ============
-    static int getInstanceCount() { return instance_count_.load(); }
-
-    // 获取GID
-    void getGid(uint8_t gid[16]) const {
-        if (m_gid_initialized) {
-            memcpy(gid, m_gid, 16);
-        } else {
-            memset(gid, 0, 16);
-        }
-    }
-
-    
-private:
-    // WR ID生成器（静态原子变量，全局递增）
-    static std::atomic<uint64_t> wr_id_counter_;
-
-    // ============ 内部初始化方法 ============
-    bool discoverAndOpenDevice();
-    bool createProtectionDomain();
-    bool createCompletionQueues();  // 现在使用共享CQ
-    bool createUdQueuePair(uint32_t max_send_wr, uint32_t max_recv_wr,
-                          uint32_t max_send_sge, uint32_t max_recv_sge,int socket_fd);
-    bool initUdQp();
-    
-    // ============ 轮询辅助方法 ============
-    int pollCompletionQueue(ibv_cq* cq, int timeout_ms);
-    int handleCompletion(ibv_wc& wc);
-    
-    // ============ 错误处理 ============
-    void setLastError(const std::string& error);
-    void setLastError(int errnum);
-    
-    // ============ 资源移动（用于移动语义） ============
-    void moveResourcesFrom(UDRdmaManager&& other);
-    void clearResources();
-    
-    // ============ 成员变量 ============
-    SimpleRdmaResources m_resources;
-    bool m_initialized = false;
-    char m_errorMsg[256] = {0};
-    std::mutex m_mutex;
-
-    // 本地地址信息
-    uint32_t local_ip_;
-    uint16_t local_port_;
-    
-    // 缓冲区
-    std::unique_ptr<SequentialUdpBuffer> send_buffer_;
-    std::unique_ptr<SequentialUdpBuffer> recv_buffer_;
-    
-    // RDMA内存区域
-    ibv_mr* send_mr_ = nullptr;
-    ibv_mr* recv_mr_ = nullptr;
-    
-    // 已创建的地址句柄
-    std::vector<ibv_ah*> m_created_ahs;
-    
-    // 静态变量，跟踪实例数量
-    static std::atomic<int> instance_count_;
-
-    // GID缓存（新增）
-    uint8_t m_gid[16];
-    bool m_gid_initialized = false;
-    bool queryGid();
-};
+//udp ring relevent
 
 
 
@@ -1925,6 +1600,297 @@ private:
     std::unordered_map<uint32_t, int> map_;
     std::mutex mutex_;
 };
+
+
+// CQ管理器 - 单例模式，管理共享的完成队列
+class CQManager {
+public:
+    // 获取单例实例
+    static CQManager& getInstance();
+    
+    // 禁止拷贝和赋值
+    CQManager(const CQManager&) = delete;
+    CQManager& operator=(const CQManager&) = delete;
+    
+    // 创建共享的CQ
+    bool createSharedCQs(ibv_context* context, 
+                        uint32_t send_cq_size = 1024,
+                        uint32_t recv_cq_size = 1024,
+                        void* send_cq_context = nullptr,
+                        void* recv_cq_context = nullptr);
+    
+    // 获取共享CQ
+    ibv_cq* getSharedSendCq() const { return m_shared_send_cq; }
+    ibv_cq* getSharedRecvCq() const { return m_shared_recv_cq; }
+    
+    // 启动/停止轮询线程
+    void startPollingThreads();
+    void stopPollingThreads();
+    
+    // 轮询接口
+    int pollSendCq(int timeout_ms = 0);
+    int pollRecvCq(int timeout_ms = 0);
+    
+    // 清理资源
+    void cleanup();
+    
+    // 统计信息结构体
+    struct CQStats {
+        uint64_t send_completions;
+        uint64_t recv_completions;
+        uint64_t send_errors;
+        uint64_t recv_errors;
+        size_t registered_qps;
+    };
+    
+    // 获取和打印统计信息
+    CQStats getStats() const;
+    void printStats() const;
+    
+private:
+    // 私有构造函数和析构函数
+    CQManager();
+    ~CQManager();
+    
+    // 轮询线程函数
+    void sendPollingThread();
+    void recvPollingThread();
+    
+    // 处理完成事件
+    void handleSendCompletion(ibv_wc& wc);
+    void handleRecvCompletion(ibv_wc& wc);
+    
+private:
+    // 共享的CQ
+    ibv_cq* m_shared_send_cq;
+    ibv_cq* m_shared_recv_cq;
+    
+    // 轮询线程
+    std::thread m_send_polling_thread;
+    std::thread m_recv_polling_thread;
+    std::atomic<bool> m_polling_stop;
+    
+    // 统计信息
+    std::atomic<uint64_t> m_send_completions;
+    std::atomic<uint64_t> m_recv_completions;
+    std::atomic<uint64_t> m_send_errors;
+    std::atomic<uint64_t> m_recv_errors;
+    
+    // 同步原语
+    mutable std::mutex m_mutex;
+    mutable std::condition_variable m_cv;
+};
+
+//ud rdma qp
+// 简化的RDMA资源结构
+struct SimpleRdmaResources {
+    ibv_context* context = nullptr;      // 设备上下文
+    ibv_pd* pd = nullptr;                // 保护域
+    ibv_qp* qp = nullptr;                // 队列对（UD类型）
+    
+    // 内存区域
+    struct {
+        ibv_mr* send_mr = nullptr;       // 发送内存区域
+        ibv_mr* recv_mr = nullptr;       // 接收内存区域
+        void* send_buf = nullptr;        // 发送缓冲区
+        void* recv_buf = nullptr;        // 接收缓冲区
+        size_t send_size = 0;            // 发送缓冲区大小
+        size_t recv_size = 0;            // 接收缓冲区大小
+    } memory;
+    
+    // 设备信息
+    struct {
+        std::string name;
+        uint8_t port_num = 1;
+        uint16_t lid = 0;
+    } device;
+    
+    // UD特定参数
+    uint32_t qkey = 0x111111;
+    
+    // 共享CQ引用
+    ibv_cq* shared_send_cq = nullptr;
+    ibv_cq* shared_recv_cq = nullptr;
+};
+
+
+
+// 简化的RDMA管理器 - 单例模式，只管理一个UD QP
+
+
+// 一个进程一个qp，然后两个节点通信的时候，发现对面的ip地址有就可以直接发送到那个qp即可
+// 然后每个udp socket维护自己的ringbuffer
+// 同样有一个额外的轮询线程，这个轮询线程会负责一直轮询cq
+// 在发送数据包的时候会同时发送一个包头过去，这个包头在最前面，告诉对面这个包的源IP，目标IP，源port，目标port
+// 这一个数据包的长度用立即数来传
+// 所以在创建socket时就需要为每个socket根据ip地址和端口建立一个映射，方便后面查找
+// 当轮询线程轮循到某一个数据包时，就可以根据.
+
+// 不对，压根就不可行，轮询线程轮循到数据包时，只能通知那一个socket，但是他调用recvfrom时，都不知道数据从哪里取
+
+
+// 还是不可行，必须每个udp socket一个qp，自己管自己的
+class UDRdmaManager {
+public:
+    // 构造函数
+    UDRdmaManager(uint32_t local_ip, uint16_t local_port);
+    
+    // 析构函数
+    ~UDRdmaManager();
+    
+    // 禁止拷贝构造和拷贝赋值
+    UDRdmaManager(const UDRdmaManager&) = delete;
+    UDRdmaManager& operator=(const UDRdmaManager&) = delete;
+    
+    // 允许移动构造和移动赋值
+    UDRdmaManager(UDRdmaManager&& other) noexcept;
+    UDRdmaManager& operator=(UDRdmaManager&& other) noexcept;
+    
+    // 初始化RDMA资源
+    bool initialize(uint32_t local_ip, uint16_t local_port, int sockfd,
+                    size_t send_buffer_size = 1024,
+                    size_t recv_buffer_size = 1024,
+                    uint32_t max_send_wr = 1024,
+                    uint32_t max_recv_wr = 1024,
+                    uint32_t max_send_sge = 16,
+                    uint32_t max_recv_sge = 16);
+    
+    // 清理所有资源
+    void cleanup();
+    
+    // 检查是否已初始化
+    bool isInitialized() const { return m_initialized; }
+    
+    // ============ QP和资源获取 ============
+    ibv_qp* getQp() const { return m_resources.qp; }
+    ibv_pd* getPd() const { return m_resources.pd; }
+    ibv_context* getContext() const { return m_resources.context; }
+    
+    // 获取QP信息
+    uint32_t getQpNum() const { return m_resources.qp ? m_resources.qp->qp_num : 0; }
+    uint16_t getLid() const { return m_resources.device.lid; }
+    uint8_t getPortNum() const { return m_resources.device.port_num; }
+    uint32_t getQkey() const { return m_resources.qkey; }
+    
+    // ============ 缓冲区信息 ============
+
+    uint32_t getSendBufferLkey() const { 
+        return m_resources.memory.send_mr ? m_resources.memory.send_mr->lkey : 0; 
+    }
+    uint32_t getRecvBufferLkey() const { 
+        return m_resources.memory.recv_mr ? m_resources.memory.recv_mr->lkey : 0; 
+    }
+    
+    // 分配和注册内存区域
+    bool allocateAndRegisterMemory(uint32_t local_ip, uint16_t local_port, size_t send_block_count, size_t recv_block_count);
+    
+    // ============ SequentialUdpBuffer 管理 ============
+    // 获取发送缓冲区引用
+    SequentialUdpBuffer& send_buffer() { return *send_buffer_; }
+    const SequentialUdpBuffer& send_buffer() const { return *send_buffer_; }
+    
+    // 获取接收缓冲区引用
+    SequentialUdpBuffer& recv_buffer() { return *recv_buffer_; }
+    const SequentialUdpBuffer& recv_buffer() const { return *recv_buffer_; }
+    
+    // 获取MR信息
+    struct MemoryRegions {
+        ibv_mr* send_mr;
+        ibv_mr* recv_mr;
+        size_t send_size;
+        size_t recv_size;
+    };
+    
+    MemoryRegions get_memory_regions() const;
+    
+    // ============ 本地地址管理 ============
+    bool updateLocalAddress(uint32_t new_local_ip, uint16_t new_local_port);
+    
+    // ============ 接收缓冲区相关方法 ============
+    size_t post_recv(size_t n);
+    bool post_single_recv_internal();
+    
+    // ============ 共享CQ管理 ============
+    // 静态方法获取共享CQ
+    static ibv_cq* getSharedSendCq();
+    static ibv_cq* getSharedRecvCq();
+    
+    // 静态方法启动/停止轮询线程
+    static bool startPollingThreads();
+    static void stopPollingThreads();
+    
+    // 静态方法获取统计信息
+    static void printCqStats();
+    
+    // ============ 错误信息 ============
+    const char* getLastError() const { return m_errorMsg; }
+    
+    // ============ 调试信息 ============
+    void printInfo() const;
+    
+    // ============ 资源统计 ============
+    static int getInstanceCount() { return instance_count_.load(); }
+
+    // 获取GID
+    void getGid(uint8_t gid[16]) const {
+        if (m_gid_initialized) {
+            memcpy(gid, m_gid, 16);
+        } else {
+            memset(gid, 0, 16);
+        }
+    }
+
+    
+private:
+    // WR ID生成器（静态原子变量，全局递增）
+    static std::atomic<uint64_t> wr_id_counter_;
+
+    // ============ 内部初始化方法 ============
+    bool discoverAndOpenDevice();
+    bool createProtectionDomain();
+    bool createCompletionQueues();  // 现在使用共享CQ
+    bool createUdQueuePair(uint32_t max_send_wr, uint32_t max_recv_wr,
+                          uint32_t max_send_sge, uint32_t max_recv_sge,int socket_fd);
+    bool initUdQp();
+    
+    
+    // ============ 错误处理 ============
+    void setLastError(const std::string& error);
+    void setLastError(int errnum);
+
+    
+    // ============ 成员变量 ============
+    SimpleRdmaResources m_resources;
+    bool m_initialized = false;
+    char m_errorMsg[256] = {0};
+    std::mutex m_mutex;
+
+    // 本地地址信息
+    uint32_t local_ip_;
+    uint16_t local_port_;
+    
+    // 缓冲区
+    std::unique_ptr<SequentialUdpBuffer> send_buffer_;
+    std::unique_ptr<SequentialUdpBuffer> recv_buffer_;
+    
+    // RDMA内存区域
+    ibv_mr* send_mr_ = nullptr;
+    ibv_mr* recv_mr_ = nullptr;
+    
+    // 已创建的地址句柄
+    std::vector<ibv_ah*> m_created_ahs;
+    
+    // 静态变量，跟踪实例数量
+    static std::atomic<int> instance_count_;
+
+    // GID缓存（新增）
+    uint8_t m_gid[16];
+    bool m_gid_initialized = false;
+    bool queryGid();
+};
+
+
+
 
 // zc add
 extern SoRconn_collection* g_p_conn_collection;

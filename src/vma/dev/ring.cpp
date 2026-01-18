@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "vma/sock/fd_collection.h"
 
 
 #undef  MODULE_NAME
@@ -1101,7 +1102,7 @@ void CQManager::handleSendCompletion(ibv_wc& wc) {
         if (sock_ptr) {
             Socket_tb_udp* udp_sock = dynamic_cast<Socket_tb_udp*>(sock_ptr);
             if (udp_sock) {
-                bool success = udp_sock->m_rdma_manager->send_buffer()->mark_block_sent_completed();
+                bool success = udp_sock->m_rdma_manager->send_buffer().mark_block_sent_completed();
                     if (!success) {
                         std::cerr << "Warning: Failed to mark block as sent completed for QP " 
                                   << wc.qp_num << std::endl;
@@ -1117,8 +1118,7 @@ void CQManager::handleSendCompletion(ibv_wc& wc) {
         std::cerr << "Warning: No fd found for QP " << wc.qp_num << std::endl;
     }
     // 默认处理：打印完成事件信息
-        std::cout << "Send completion: QP=" << qp_name 
-                  << " (qp_num=" << wc.qp_num << ")"
+        std::cout << " (qp_num=" << wc.qp_num << ")"
                   << ", wr_id=" << wc.wr_id
                   << ", status=" << ibv_wc_status_str(wc.status)
                   << ", opcode=" << wc.opcode
@@ -1149,10 +1149,7 @@ void CQManager::handleRecvCompletion(ibv_wc& wc) {
             
             if (udp_sock) {
                 // 1. 更新接收缓冲区状态
-                if (udp_sock->m_rdma_manager && udp_sock->m_rdma_manager->recv_buffer()) {
-                    // 标记接收缓冲区中已接收完成的块
-                    bool success = udp_sock->m_rdma_manager->recv_buffer()->mark_block_received_completed();
-                }
+                udp_sock->m_rdma_manager->recv_buffer().mark_block_received_completed();
             }
             else {
                 std::cerr << "Warning: Socket is not UDP type for QP " << wc.qp_num << std::endl;
@@ -1164,8 +1161,7 @@ void CQManager::handleRecvCompletion(ibv_wc& wc) {
         std::cerr << "Warning: No fd found for QP " << wc.qp_num << std::endl;
     }
     // 默认处理：打印完成事件信息
-        std::cout << "recv completion: QP=" << qp_name 
-                  << " (qp_num=" << wc.qp_num << ")"
+        std::cout << " (qp_num=" << wc.qp_num << ")"
                   << ", wr_id=" << wc.wr_id
                   << ", status=" << ibv_wc_status_str(wc.status)
                   << ", opcode=" << wc.opcode
@@ -1332,17 +1328,6 @@ void UDRdmaManager::cleanup() {
         m_resources.memory.send_buf = nullptr;
     }
     
-    // 销毁CQ
-    if (m_resources.recv_cq) {
-        ibv_destroy_cq(m_resources.recv_cq);
-        m_resources.recv_cq = nullptr;
-    }
-    
-    if (m_resources.send_cq) {
-        ibv_destroy_cq(m_resources.send_cq);
-        m_resources.send_cq = nullptr;
-    }
-    
     // 销毁PD
     if (m_resources.pd) {
         ibv_dealloc_pd(m_resources.pd);
@@ -1441,9 +1426,6 @@ bool UDRdmaManager::createCompletionQueues() {
     // 检查共享CQ是否已经创建
     if (cq_manager.getSharedSendCq() && cq_manager.getSharedRecvCq()) {
         // 共享CQ已经存在，直接使用
-        
-        std::cout << "Using existing shared completion queues: send_cq=" << m_resources.send_cq 
-                  << ", recv_cq=" << m_resources.recv_cq << std::endl;
         return true;
     }
     
@@ -1456,8 +1438,6 @@ bool UDRdmaManager::createCompletionQueues() {
     // 启动轮询线程
     cq_manager.startPollingThreads();
     
-    std::cout << "Created shared completion queues: send_cq=" << m_resources.send_cq 
-              << ", recv_cq=" << m_resources.recv_cq << std::endl;
     return true;
 }
 
@@ -1561,8 +1541,6 @@ bool UDRdmaManager::createUdQueuePair(uint32_t max_send_wr,
     qp_init_attr.qp_type = IBV_QPT_UD;  // UD类型
     qp_init_attr.sq_sig_all = 1;        // 所有发送请求都产生完成事件
     
-
-
     // 获取CQManager单例
     CQManager& cq_manager = CQManager::getInstance();
     
@@ -1652,13 +1630,6 @@ bool UDRdmaManager::initUdQp() {
 }
 
 
-void UDRdmaManager::deregisterMemory(ibv_mr* mr) {
-    if (mr) {
-        ibv_dereg_mr(mr);
-        std::cout << "Deregistered memory region" << std::endl;
-    }
-}
-
 void UDRdmaManager::printInfo() const {
     std::cout << "\n=== Simple RDMA Manager Info ===" << std::endl;
     std::cout << "Status: " << (m_initialized ? "Initialized" : "Not initialized") << std::endl;
@@ -1693,180 +1664,6 @@ void UDRdmaManager::setLastError(int errnum) {
     std::cerr << "RDMA Error: " << m_errorMsg << std::endl;
 }
 
-// 轮询发送完成队列
-int UDRdmaManager::pollSendCompletionQueue(int timeout_ms = 100) {//默认每次轮询轮询100ms
-    if (!m_initialized || !m_resources.send_cq) {
-        setLastError("Send CQ not initialized");
-        return -1;
-    }
-    
-    return pollCompletionQueue(m_resources.send_cq, timeout_ms);
-}
-
-// 轮询接收完成队列
-int UDRdmaManager::pollRecvCompletionQueue(int timeout_ms = 100) {
-    if (!m_initialized || !m_resources.recv_cq) {
-        setLastError("Receive CQ not initialized");
-        return -1;
-    }
-    
-    return pollCompletionQueue(m_resources.recv_cq, timeout_ms);
-}
-
-// 通用的轮询完成队列方法
-int UDRdmaManager::pollCompletionQueue(ibv_cq* cq, int timeout_ms) {
-    if (!cq) {
-        setLastError("Invalid completion queue");
-        return -1;
-    }
-    
-    const int MAX_CQE_PER_POLL = 8000;  // 与CQ大小匹配
-    ibv_wc wc_array[MAX_CQE_PER_POLL];
-    
-    // 如果指定了超时时间，使用带超时的轮询
-    if (timeout_ms > 0) {
-        struct timeval start_time, current_time;
-        gettimeofday(&start_time, NULL);
-        
-        do {
-            // 尝试轮询CQ，一次轮询多个CQE
-            int num_completions = ibv_poll_cq(cq, MAX_CQE_PER_POLL, wc_array);
-            
-            if (num_completions > 0) {
-                // 处理所有完成事件
-                int total_handled = 0;
-                for (int i = 0; i < num_completions; i++) {
-                    int result = handleCompletion(wc_array[i]);
-                    if (result > 0) {
-                        total_handled++;
-                    } else if (result < 0) {
-                        // 发生错误，但继续处理剩余CQE
-                        std::cerr << "Error handling completion #" << i << std::endl;
-                    }
-                }
-                return total_handled;  // 返回成功处理的CQE数量
-            } else if (num_completions < 0) {
-                setLastError("Error polling completion queue");
-                return -1;
-            }
-            
-            // 检查是否超时
-            gettimeofday(&current_time, NULL);
-            long elapsed_ms = (current_time.tv_sec - start_time.tv_sec) * 1000 +
-                             (current_time.tv_usec - start_time.tv_usec) / 1000;
-            
-            if (elapsed_ms >= timeout_ms) {
-                // 超时，没有完成事件
-                return 0;
-            }     
-            
-        } while (true);
-    } 
-    // 如果没有指定超时时间，立即轮询一次
-    else if (timeout_ms == 0) {
-        // 非阻塞轮询，立即返回
-        int num_completions = ibv_poll_cq(cq, MAX_CQE_PER_POLL, wc_array);
-        
-        if (num_completions > 0) {
-            // 处理所有完成事件
-            int total_handled = 0;
-            for (int i = 0; i < num_completions; i++) {
-                int result = handleCompletion(wc_array[i]);
-                if (result > 0) {
-                    total_handled++;
-                } else if (result < 0) {
-                    std::cerr << "Error handling completion #" << i << std::endl;
-                }
-            }
-            return total_handled;
-        } else if (num_completions < 0) {
-            setLastError("Error polling completion queue");
-            return -1;
-        }
-        
-        // 没有完成事件
-        return 0;
-    }
-    // timeout_ms < 0 表示阻塞轮询（无限等待）
-    else {
-        while (true) {
-            // 阻塞轮询，每次轮询多个CQE
-            int num_completions = ibv_poll_cq(cq, MAX_CQE_PER_POLL, wc_array);
-            
-            if (num_completions > 0) {
-                // 处理所有完成事件
-                int total_handled = 0;
-                for (int i = 0; i < num_completions; i++) {
-                    int result = handleCompletion(wc_array[i]);
-                    if (result > 0) {
-                        total_handled++;
-                    } else if (result < 0) {
-                        std::cerr << "Error handling completion #" << i << std::endl;
-                    }
-                }
-                return total_handled;
-            } else if (num_completions < 0) {
-                setLastError("Error polling completion queue");
-                return -1;
-            }
-            
-            // 短暂休眠，避免忙等待消耗CPU
-            usleep(100); // 休眠100微秒
-        }
-    }
-}
-
-// 处理完成事件
-int UDRdmaManager::handleCompletion(ibv_wc& wc) {
-    if (wc.status != IBV_WC_SUCCESS) {
-        std::cerr << "Work completion error: " << ibv_wc_status_str(wc.status) 
-                  << " (opcode: " << wc.opcode << ", wr_id: " << wc.wr_id << ")" << std::endl;
-        
-        // 根据错误类型处理
-        switch (wc.status) {
-            case IBV_WC_RETRY_EXC_ERR:
-                setLastError("Retry exceeded error");
-                break;
-            case IBV_WC_RNR_RETRY_EXC_ERR:
-                setLastError("RNR retry exceeded error");
-                break;
-            case IBV_WC_LOC_QP_OP_ERR:
-                setLastError("Local QP operation error");
-                break;
-            case IBV_WC_LOC_PROT_ERR:
-                setLastError("Local protection error");
-                break;
-            case IBV_WC_WR_FLUSH_ERR:
-                setLastError("Work request flushed error");
-                break;
-            default:
-                setLastError("Unknown completion error");
-                break;
-        }
-        
-        // 返回负值表示错误
-        return -static_cast<int>(wc.status);
-    }
-    
-    // 成功完成，返回工作请求ID或操作类型
-    std::cout << "Completion success: opcode=" << wc.opcode 
-              << ", byte_len=" << wc.byte_len 
-              << ", wr_id=" << wc.wr_id << std::endl;
-    
-    // 根据操作类型返回不同的正值
-    switch (wc.opcode) {
-        case IBV_WC_SEND:
-            return 1;  // 发送完成
-        case IBV_WC_RECV:
-            return 2;  // 接收完成
-        case IBV_WC_RDMA_WRITE:
-            return 3;  // RDMA写完成
-        case IBV_WC_RDMA_READ:
-            return 4;  // RDMA读完成
-        default:
-            return wc.wr_id > 0 ? wc.wr_id : 1;  // 返回wr_id或默认值
-    }
-}
 
 // ============ 接收缓冲区相关方法实现 ============
 // 初始化静态原子变量

@@ -46,6 +46,7 @@
 #include <vma/proto/ip_frag.h>
 #include <vma/dev/buffer_pool.h>
 #include <vma/dev/ring_profile.h>
+
 #include <vma/event/event_handler_manager.h>
 #include <vma/event/vlogger_timer_handler.h>
 #include <vma/iomux/poll_call.h>
@@ -62,6 +63,8 @@
 
 #include "fd_collection.h"
 #include "vma/util/instrumentation.h"
+
+#include <vma/dev/ring.h>
 
 using namespace std;
 
@@ -833,10 +836,7 @@ int socket_internal(int __domain, int __type, int __protocol, bool check_offload
 
 	BULLSEYE_EXCLUDE_BLOCK_START
 	if (!orig_os_api.socket) get_orig_funcs();
-	BULLSEYE_EXCLUDE_BLOCK_END
-
-	int original_type = __type;  // 保存原始类型
-    
+	BULLSEYE_EXCLUDE_BLOCK_END    
 
 	int fd = orig_os_api.socket(__domain, __type, __protocol);
 
@@ -997,7 +997,7 @@ int accept(int __fd, struct sockaddr *__addr, socklen_t *__addrlen)
 	int myfd = orig_os_api.accept(__fd, __addr, __addrlen);
 
 	if(my_g_p_fd_collection)
-		my_g_p_fd_collection->add_socketfd(myfd);
+		my_g_p_fd_collection->add_socketfd(myfd, SOCK_STREAM);
 
 	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(myfd);
@@ -1775,15 +1775,18 @@ EXPORT_SYMBOL
 ssize_t recvfrom(int __fd, void *__buf, size_t __nbytes, int __flags,
 		 struct sockaddr *__from, socklen_t *__fromlen)
 {
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.recvfrom) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
 
 	//zc add 
 	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
 	if(p_socket){
-		return p_socket->recvfrom(__fd, __buf, __nbytes, __flags, __to, __tolen);
+		return p_socket->recvfrom(__buf, __nbytes, __flags, __from, __fromlen);
 	}
 
-	return orig_os_api.recvfrom(__fd, __buf, __nbytes, __flags, __to, __tolen);
+	return orig_os_api.recvfrom(__fd, __buf, __nbytes, __flags, __from, __fromlen);
 
 
 
@@ -2095,22 +2098,18 @@ ssize_t sendto(int __fd, __const void *__buf, size_t __nbytes, int __flags,
 	       const struct sockaddr *__to, socklen_t __tolen)
 {
 
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.sendto) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
 
 	//zc add 
 	Socket_transbridge* p_socket = NULL;
 	p_socket = my_fd_collection_get_sockfd(__fd);
 	if(p_socket){
-		return p_socket->sendto(__fd, __buf, __nbytes, __flags, __to, __tolen);
+		return p_socket->sendto(__buf, __nbytes, __flags, __to, __tolen);
 	}
 
-	BULLSEYE_EXCLUDE_BLOCK_START
-	if (!orig_os_api.sendto) get_orig_funcs();
-	BULLSEYE_EXCLUDE_BLOCK_END
-
-
 	return orig_os_api.sendto(__fd, __buf, __nbytes, __flags, __to, __tolen);
-
-
 
 #ifdef RDTSC_MEASURE_TX_SENDTO_TO_AFTER_POST_SEND
 	RDTSC_TAKE_START(g_rdtsc_instr_info_arr[RDTSC_FLOW_SENDTO_TO_AFTER_POST_SEND]);
@@ -3137,9 +3136,6 @@ int Socket_tb_tcp::accept(){
 	if(g_p_conn_collection){
 		g_p_conn_collection->add_sorconn(m_fd);
 	}
-	
-	m_sorconn_key = m_fd;
-
 
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
 	p_sor_conn->connect_to_peer();
@@ -3158,22 +3154,15 @@ int Socket_tb_tcp::connect(){
 		g_p_conn_collection->add_sorconn(m_fd);
 	}
 
-	m_sorconn_key = m_fd;
-
-
 	SoR_connection* p_sor_conn = sorconn_collection_get_conn(m_fd);
 	p_sor_conn->connect_to_peer();
 
 	//p_sor_conn->post_receive();
 
-
 	return m_fd;
 }
 
-int Socket_tb_tcp::bind(const sockaddr *__addr, socklen_t __addrlen){
-	if(__addr && __addrlen){
-
-	}
+int Socket_tb_tcp::bind(){
 	
 	
 	return 0;
@@ -3382,6 +3371,7 @@ Socket_tb_udp::Socket_tb_udp(int fd)
     : Socket_transbridge(fd)  // 调用基类构造函数
 {
     setType(SOCKET_TYPE_UDP);
+	m_rdma_initialized = false;
     // 子类特有的初始化代码
 }
 
@@ -3392,8 +3382,8 @@ Socket_tb_udp::~Socket_tb_udp(){
 //udp和tcp不同，udp在申请socket以后可能就会马上调用sendto来发送数据了，逻辑上就需要一申请socket以后立马分配rdma资源，
 //只要检测到应用程序申请的socket类型是sock——dgram数据报类型的就立马申请ud qp的rdma资源，
 //（实际上一个进程可以只使用一个ud qp，现在只考虑最简单的通信情况）
-Socket_tb_udp::socket(){
-
+int Socket_tb_udp::socket(){
+	return 0 ;
 }
 
 //这是对于udp服务器端的，需要绑定到某一个ip地址和port然后再准备接收数据
@@ -3407,11 +3397,14 @@ int Socket_tb_udp::bind() {
     // 如果没有绑定，获取绑定的本地地址信息
     struct sockaddr_in local_addr;
     socklen_t local_len = sizeof(local_addr);
-    if (orig_os_api.getsockname(m_sockfd, (struct sockaddr*)&local_addr, &local_len) < 0) {
+    if (orig_os_api.getsockname(m_fd, (struct sockaddr*)&local_addr, &local_len) < 0) {
         std::cerr << "Failed to get socket name: " << strerror(errno) << std::endl;
         return -1;
     }
     
+	extractAddressFromSockaddr(&local_addr);
+
+	int result = 0;
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &local_addr.sin_addr, ip_str, sizeof(ip_str));
     uint16_t port = ntohs(local_addr.sin_port);
@@ -3426,7 +3419,7 @@ int Socket_tb_udp::bind() {
         return result;
     }
 
-    extractAddressFromSockaddr(local_addr);
+    
 
     m_rdma_initialized = true;
     std::cout << "RDMA manager initialized successfully after bind" << std::endl;
@@ -3448,14 +3441,14 @@ bool Socket_tb_udp::initRdmaManager(uint32_t local_ip, uint16_t local_port, int 
 
 
 //note：按理来说，如果是udp传数据的话应该需要把这次我们通信的ip地址和端口号一起发送到对端
-Socket_tb_udp::sendto(__const void *__buf, size_t __nbytes, int __flags,
+ssize_t Socket_tb_udp::sendto(__const void *__buf, size_t __nbytes, int __flags,
 	       const struct sockaddr *__to, socklen_t __tolen){
 	//1. 先查ip和port有没有记录，是不是有通信过
 	//2. 通过ip和port和对端尝试通过udp通信
 	//3. 交换qpn
 	//4. 要记录qpn和ip地址和port的对应关系
 
-	if (!buf || nbytes == 0 || !destAddr || addrlen != sizeof(sockaddr_in)) {
+	if (!__buf || __nbytes == 0 || !__to || __tolen != sizeof(sockaddr_in)) {
         errno = EINVAL;
         return -1;
     }
@@ -3478,7 +3471,7 @@ Socket_tb_udp::sendto(__const void *__buf, size_t __nbytes, int __flags,
                   << ", exchanging RDMA metadata..." << std::endl;
         
         // 在这里调用 establish_rdma_connection
-        if (!establish_rdma_connection(ip_str, port, , __to)) {
+        if (!establish_rdma_connection(ip_str, port, __to)) {
             std::cerr << "Failed to establish RDMA connection, falling back to normal UDP" << std::endl;
             // 如果建立RDMA连接失败，回退到普通UDP发送
             return orig_os_api.sendto(m_fd, __buf, __nbytes, __flags, __to, __tolen);
@@ -3520,9 +3513,6 @@ Socket_tb_udp::sendto(__const void *__buf, size_t __nbytes, int __flags,
         return orig_os_api.sendto(m_fd, __buf, __nbytes, __flags, __to, __tolen);
     }
     
-    std::cout << "Data sent via RDMA UD to " << ip_str << ":" << port 
-              << " (QPN: " << peer->qpn << ")" << std::endl;
-    
     return __nbytes;
 
 }
@@ -3550,7 +3540,7 @@ bool Socket_tb_udp::establish_rdma_connection(const char* remote_ip, int remote_
             uint16_t local_port = ntohs(test_addr.sin_port);
             
             // 使用已有的本地地址初始化RDMA资源
-            if (!initRdmaManager(test_addr.sin_addr.s_addr, test_addr.sin_port, m_fd )) {
+            if (!initRdmaManager(test_addr.sin_addr.s_addr, local_port, m_fd )) {
                 std::cerr << "Failed to initialize RDMA manager with existing bind" << std::endl;
                 return false;
             }
@@ -3696,7 +3686,7 @@ bool Socket_tb_udp::receive_metadata(int sockfd, sockaddr* from, socklen_t* from
 
 
 void Socket_tb_udp::updateRdmaLocalAddress(uint32_t new_ip, uint16_t new_port) {
-    if (!rdma_manager_) {
+    if (!m_rdma_manager) {
         return;
     }
     
@@ -3709,11 +3699,11 @@ void Socket_tb_udp::updateRdmaLocalAddress(uint32_t new_ip, uint16_t new_port) {
     // 这里需要更新RDMA管理器中的本地地址
     // 注意：如果SequentialUdpBuffer已经创建，可能需要重新创建
     // 或者添加一个更新地址的方法
-    rdma_manager_->updateLocalAddress(new_ip_host, new_port_host);
+    m_rdma_manager->updateLocalAddress(new_ip_host, new_port_host);
 }
 
 
-bool Socket_tb_udp::post_send_to_peer(PeerInfo* peer, size_t data_len) {
+bool Socket_tb_udp::post_send_to_peer(const PeerInfo* peer, size_t data_len) {
     if (!m_rdma_manager || !peer) {
         return false;
     }
@@ -3777,26 +3767,28 @@ bool Socket_tb_udp::post_send_to_peer(PeerInfo* peer, size_t data_len) {
 ssize_t Socket_tb_udp::recvfrom(void *buf, size_t nbytes, int flags,
                                sockaddr *srcAddr, socklen_t *addrlen) {
     // 1. 首先检查接收缓冲区是否有数据
-    if (m_rdma_manager && m_rdma_manager->recv_buffer() && 
-        m_rdma_manager->recv_buffer()->has_data()) {
-        
-        // 直接从接收缓冲区读取数据
-        ssize_t bytes_read = m_rdma_manager->recv_buffer()->read_block(
-            buf, nbytes, srcAddr, addrlen);
-        
-        if (bytes_read > 0) {
-            // 成功从缓冲区读取数据后，发布一个新的接收WR
-            if (m_rdma_manager->recv_buffer()->available_blocks() > 0) {
-                m_rdma_manager->post_recv(1);
-            }
-            return bytes_read;
-        }
-        
-        // 如果bytes_read < 0，说明缓冲区太小，返回错误
-        if (bytes_read < 0) {
-            errno = EMSGSIZE;
-            return -1;
-        }
+	
+	if(m_rdma_initialized)
+	{
+		if(m_rdma_manager->recv_buffer().has_data()){
+			// 直接从接收缓冲区读取数据
+        	ssize_t bytes_read = m_rdma_manager->recv_buffer().read_block(
+        	    buf, nbytes, srcAddr, addrlen);
+	
+        	if (bytes_read > 0) {
+        	    // 成功从缓冲区读取数据后，发布一个新的接收WR
+        	    if (m_rdma_manager->recv_buffer().available_blocks() > 0) {
+        	        m_rdma_manager->post_recv(1);
+        	    }
+        	    return bytes_read;
+        	}
+	
+        	// 如果bytes_read < 0，说明缓冲区太小，返回错误
+        	if (bytes_read < 0) {
+        	    errno = EMSGSIZE;
+        	    return -1;
+			}
+		}    
     }
     
     // 2. 如果没有数据，根据flags决定行为
@@ -3829,24 +3821,29 @@ ssize_t Socket_tb_udp::recvfrom(void *buf, size_t nbytes, int flags,
     
     while (total_wait_us < MAX_WAIT_MS * 1000) {
         // 首先检查接收缓冲区
-        if (m_rdma_manager && m_rdma_manager->recv_buffer() && 
-            m_rdma_manager->recv_buffer()->has_data()) {
-            
-            // 读取数据
-            ssize_t bytes_read = m_rdma_manager->recv_buffer()->read_block(
-                buf, nbytes, srcAddr, addrlen);
-            
-            if (bytes_read > 0) {
-                // 成功读取，发布新的接收WR
-                if (m_rdma_manager->recv_buffer()->available_blocks() > 0) {
-                    m_rdma_manager->post_recv(1);
-                }
-                
-                // 恢复socket标志
-                orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
-                return bytes_read;
-            }
-        }
+		if(m_rdma_initialized)
+		{
+			if(m_rdma_manager->recv_buffer().has_data()){
+				// 直接从接收缓冲区读取数据
+        		ssize_t bytes_read = m_rdma_manager->recv_buffer().read_block(
+        		    buf, nbytes, srcAddr, addrlen);
+				// 恢复socket标志
+        	        orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
+        		if (bytes_read > 0) {
+        		    // 成功从缓冲区读取数据后，发布一个新的接收WR
+        		    if (m_rdma_manager->recv_buffer().available_blocks() > 0) {
+        		        m_rdma_manager->post_recv(1);
+        		    }
+        		    return bytes_read;
+        		}
+
+        		// 如果bytes_read < 0，说明缓冲区太小，返回错误
+        		if (bytes_read < 0) {
+        		    errno = EMSGSIZE;
+        		    return -1;
+				}
+			}    
+    	}
         
         // 然后检查UDP socket是否有数据（非阻塞）
         char temp_buf[65536];
@@ -3859,13 +3856,12 @@ ssize_t Socket_tb_udp::recvfrom(void *buf, size_t nbytes, int flags,
         
         if (recv_len > 0) {
             // 处理UDP元数据
-            ssize_t result = handle_udp_metadata(temp_buf, recv_len, 
-                                                (sockaddr*)&temp_addr, temp_addrlen,
-                                                buf, nbytes, srcAddr, addrlen);
+			sockaddr_in& src_addr_in = *reinterpret_cast<sockaddr_in*>(&temp_addr);
+    		handle_udp_metadata(temp_buf, recv_len, src_addr_in, temp_addrlen);
             
             // 恢复socket标志
             orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
-            return result;
+            continue;
         } else if (recv_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
             // 真正的错误
             orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
@@ -3887,9 +3883,11 @@ ssize_t Socket_tb_udp::recvfrom(void *buf, size_t nbytes, int flags,
 
 // 处理UDP元数据
 ssize_t Socket_tb_udp::handle_udp_metadata(char* temp_buf, ssize_t recv_len,
-                                          sockaddr_in& src_addr, socklen_t src_len,
-                                          void *buf, size_t nbytes) {
-    
+                                          sockaddr_in& src_addr, socklen_t src_len) {
+    if(recv_len){
+		//maybe not need
+	}
+
     // 获取源地址信息
     char from_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &src_addr.sin_addr, from_ip, sizeof(from_ip));
@@ -4001,74 +3999,13 @@ ssize_t Socket_tb_udp::handle_udp_metadata(char* temp_buf, ssize_t recv_len,
         std::cout << "  Port: " << static_cast<int>(local_metadata.port_num) << std::endl;
         
         // 4. 发送回复后，立即轮询RDMA CQ等待数据
+		// 这个地方改变，让轮询现成去负责，这边直接返回
         // 对端在收到我们的元数据回复后，很可能会立即通过RDMA发送实际数据
         std::cout << "Waiting for RDMA data from " << from_ip << ":" << from_port << " ..." << std::endl;
-        
-        const int RDMA_WAIT_MS = 3000; // 等待RDMA数据3秒
-        int rdma_wait_ms = 0;
-        
-        while (rdma_wait_ms < RDMA_WAIT_MS) {
-            // 轮询接收完成队列
-            int rdma_result = m_rdma_manager->pollRecvCompletionQueue(100); // 每次轮询100ms
-            
-            if (rdma_result > 0) {
-                // 有RDMA数据到达
-                std::cout << "Received RDMA data after metadata exchange!" << std::endl;
-                
-                // 处理RDMA数据
-                ssize_t data_len = handle_rdma_data(buf, nbytes, from_ip, from_port);
-                
-                if (data_len > 0) {
-                    // 成功接收到RDMA数据
-                    return data_len;
-                } else if (data_len == 0) {
-                    // 有数据但未处理
-                    std::cout << "RDMA data received but not processed" << std::endl;
-                    return 0;
-                } else {
-                    // 处理RDMA数据出错
-                    std::cerr << "Failed to process RDMA data" << std::endl;
-                    return -1;
-                }
-            } else if (rdma_result < 0) {
-                // RDMA轮询出错
-                std::cerr << "Error polling RDMA receive queue" << std::endl;
-                break;
-            }
-            
-            rdma_wait_ms += 100;
-            
-            // 每500ms输出一次等待状态
-            if (rdma_wait_ms % 500 == 0) {
-                std::cout << "Still waiting for RDMA data (" << rdma_wait_ms << "/" << RDMA_WAIT_MS << " ms)..." << std::endl;
-            }
-        }
-        
-        // 等待RDMA数据超时
-        std::cout << "Timeout waiting for RDMA data after metadata exchange" << std::endl;
-        std::cout << "RDMA metadata exchange completed with " << from_ip << ":" << from_port << std::endl;
         
     } else {
         // 已经交换过元数据
         std::cout << "Already have RDMA metadata from " << from_ip << ":" << from_port << std::endl;
-        
-        // 检查是否有待处理的RDMA数据
-        int rdma_result = m_rdma_manager->pollRecvCompletionQueue(0); // 非阻塞检查
-        
-        if (rdma_result > 0) {
-            std::cout << "Found pending RDMA data for this peer" << std::endl;
-            
-            // 处理RDMA数据
-            ssize_t data_len = handle_rdma_data(buf, nbytes, from_ip, from_port);
-            
-            if (data_len > 0) {
-                return data_len;
-            } else if (data_len == 0) {
-                return 0;
-            }
-        }
-        
-        std::cout << "No pending RDMA data for this peer" << std::endl;
     }
     
     // 5. 返回0表示元数据交换完成（成功或重复）

@@ -80,7 +80,7 @@ public:
     ~My_fd_collection();
 
     // 添加socket文件描述符到集合,要根据tcp还是udp区分开
-    int add_socketfd(int fd,, int __type);
+    int add_socketfd(int fd, int __type);
     
     // 根据fd查找对应的Socket_transbridge实例
     Socket_transbridge* find_socketfd(int fd);

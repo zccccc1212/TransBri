@@ -205,36 +205,55 @@ public:
     virtual ~Socket_transbridge();
 
     // 通用接口
-    virtual int socket() = 0;
+    
     virtual int close();
     virtual int setsockopt(int level, int optname, const void *optval, socklen_t optlen);
     virtual int getsockopt(int level, int optname, void *optval, socklen_t *optlen);
     
+    
+
+    virtual    int socket();
+    virtual    int listen(int backlog);
+    virtual    int accept();
+    virtual    int connect();
+    virtual    int bind();
+
+
+            // 数据收发
+    virtual    ssize_t send(__const void *__buf, size_t __nbytes, int __flags);
+    virtual    ssize_t recv(void *buf, size_t nbytes, int flags = 0);
+        
+            // 便捷读写接口
+    virtual    ssize_t write(__const void *__buf, size_t __nbytes);
+    virtual    ssize_t read(void *buf, size_t nbytes);
+
+        // UDP数据收发
+    ssize_t sendto(__const void *__buf, size_t __nbytes, int __flags,
+	       const struct sockaddr *__to, socklen_t __tolen);
+    //note !! sendto sendmsg类似的中，都默认了bind的操作，如果这个套接字没有和某个ip地址和端口绑定的话，此时会默认绑定
+    
+    ssize_t recvfrom(void *buf, size_t nbytes, int flags,
+                     sockaddr *srcAddr, socklen_t *addrlen);
+
     // 地址绑定
-    virtual int bind(const sockaddr *addr, socklen_t addrlen);
-    void extractAddressFromSockaddr(const sockaddr *addr) {
-        if (addr == nullptr) return;
-        
-        char ip_str[INET6_ADDRSTRLEN] = {0};
-        
-        if (addr->sa_family == AF_INET) {
-            // IPv4地址
-            struct sockaddr_in *addr_in = (struct sockaddr_in *)addr;
-            inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);
-            m_bind_port = ntohs(addr_in->sin_port);
-        } else if (addr->sa_family == AF_INET6) {
-            // IPv6地址
-            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)addr;
-            inet_ntop(AF_INET6, &(addr_in6->sin6_addr), ip_str, INET6_ADDRSTRLEN);
-            m_bind_port = ntohs(addr_in6->sin6_port);
-        } else {
-            // 未知地址族
+    void extractAddressFromSockaddr(const sockaddr_in *addr) {
+        if (!addr || addr->sin_family != AF_INET) {
             m_bind_ip.clear();
             m_bind_port = 0;
+            m_isBound = false;
             return;
         }
-        
-        m_bind_ip = ip_str;
+
+        char ip_str[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &addr->sin_addr, ip_str, sizeof(ip_str))) {
+            m_bind_ip = ip_str;
+            m_bind_port = ntohs(addr->sin_port);
+            m_isBound = true;
+        } else {
+            m_bind_ip.clear();
+            m_bind_port = 0;
+            m_isBound = false;
+        }
     }
 
     bool isBound() const { return m_isBound; }
@@ -252,6 +271,8 @@ public:
 protected:
     int m_fd;
 	SocketType m_type;  // socket类型
+
+    bool islistenserver;
 
     // 绑定的IP地址和端口号
     std::string m_bind_ip;   // 绑定的IP地址
@@ -273,7 +294,7 @@ public:
     int listen(int backlog);
     int accept();
     int connect();
-    int bind(const sockaddr *addr, socklen_t addrlen);
+    int bind();
 
 
     // 数据收发
@@ -311,6 +332,7 @@ private:
 	int send_buffer_current;
 	int	recv_buffer_current;
     
+
     // 连接信息缓存
     sockaddr_in m_localAddr;
     sockaddr_in m_remoteAddr;
@@ -350,11 +372,10 @@ public:
     bool send_metadata(int sockfd, const sockaddr* to, socklen_t tolen);
     bool receive_metadata(int sockfd, sockaddr* from, socklen_t* fromlen, RDMA_Metadata& metadata);
 
-    bool post_send_to_peer(PeerInfo* peer, size_t data_len);
+    bool post_send_to_peer(const PeerInfo* peer, size_t data_len);
 
     ssize_t handle_udp_metadata(char* temp_buf, ssize_t recv_len,
-                                sockaddr_in& src_addr, socklen_t src_len,
-                                void *buf, size_t nbytes);
+                                sockaddr_in& src_addr, socklen_t src_len);
 
     // 连接模式下的收发（使用connect设置默认地址后）
     ssize_t send(const void *buf, size_t nbytes, int flags = 0);
@@ -384,6 +405,7 @@ private:
     sockaddr_in m_defaultDestAddr;
 
     // 初始化RDMA管理器
+    bool m_rdma_initialized;
     bool initRdmaManager(uint32_t local_ip, uint16_t local_port, int sockfd);
 
     bool isbound;
