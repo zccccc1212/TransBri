@@ -1481,6 +1481,24 @@ public:
     // ============ 本地地址信息 ============
     uint32_t local_ip() const noexcept;
     uint16_t local_port() const noexcept;
+    void update_local_address(uint32_t new_ip, uint16_t new_port) {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        
+        // 记录旧的地址信息（用于调试）
+        uint32_t old_ip = local_ip_;
+        uint16_t old_port = local_port_;
+        
+        // 更新地址
+        local_ip_ = new_ip;
+        local_port_ = new_port;
+        
+        // 调试输出
+        std::cout << "SequentialUdpBuffer: Updated local address from " 
+                  << format_ip_port(old_ip, old_port) 
+                  << " to " 
+                  << format_ip_port(new_ip, new_port) 
+                  << std::endl;
+    }
     
     // ============ 发送缓冲区接口 ============
     // 写入数据，头部自动使用绑定的本地IP和端口

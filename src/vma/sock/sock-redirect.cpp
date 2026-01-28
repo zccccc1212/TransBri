@@ -1176,12 +1176,24 @@ EXPORT_SYMBOL
 int setsockopt(int __fd, int __level, int __optname,
 	       __const void *__optval, socklen_t __optlen)
 {
+
 	srdr_logdbg_entry("fd=%d, level=%d, optname=%d", __fd, __level, __optname);
         
-        if (NULL == __optval) {
-                errno = EFAULT;
-                return -1;
-        }
+    if (NULL == __optval) {
+        errno = EFAULT;
+        return -1;
+    }
+	
+	// zc add
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.setsockopt) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
+
+	Socket_transbridge* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(__fd);
+	if(p_socket){
+		return p_socket->setsockopt(__level, __optname, __optval, __optlen);
+	}
 
 	int ret = 0;
 	socket_fd_api* p_socket_object = NULL;
@@ -1244,6 +1256,17 @@ int getsockopt(int __fd, int __level, int __optname,
 		SET_EXTRA_API(get_dpcp_devices, vma_get_dpcp_devices, VMA_EXTRA_API_GET_DPCP_DEVICES);
 		*((vma_api_t**)__optval) = vma_api;
 		return 0;
+	}
+
+	// zc add
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.getsockopt) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
+
+	Socket_transbridge* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(__fd);
+	if(p_socket){
+		return p_socket->getsockopt(__level, __optname, __optval, __optlen);
 	}
 
 	int ret = 0;
@@ -4010,6 +4033,795 @@ ssize_t Socket_tb_udp::handle_udp_metadata(char* temp_buf, ssize_t recv_len,
     
     // 5. 返回0表示元数据交换完成（成功或重复）
     return 0;
+}
+
+ssize_t Socket_tb_udp::recvmsg(struct msghdr *msg, int flags) {
+    // 1. 参数检查
+    if (!msg || !msg->msg_iov || msg->msg_iovlen == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    // 假设只有一个接收缓冲区（根据要求）
+    if (msg->msg_iovlen > 1) {
+        std::cerr << "recvmsg: Multiple receive buffers not supported, using first buffer only" << std::endl;
+        // 可以继续执行，但只使用第一个缓冲区
+    }
+    
+    // 获取接收缓冲区信息
+    void *buf = msg->msg_iov[0].iov_base;
+    size_t nbytes = msg->msg_iov[0].iov_len;
+    
+    if (!buf || nbytes == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    std::cout << "recvmsg: Waiting for data, buffer size: " << nbytes << " bytes" << std::endl;
+    
+    // 2. 首先检查接收缓冲区是否有数据
+    if (m_rdma_initialized) {
+        if (m_rdma_manager->recv_buffer().has_data()) {
+            std::cout << "recvmsg: Found data in RDMA receive buffer" << std::endl;
+            
+            // 准备源地址缓冲区
+            sockaddr_in src_addr;
+            socklen_t addrlen = sizeof(src_addr);
+            
+            // 直接从接收缓冲区读取数据
+            ssize_t bytes_read = m_rdma_manager->recv_buffer().read_block(
+                buf, nbytes, reinterpret_cast<sockaddr*>(&src_addr), &addrlen);
+            
+            if (bytes_read > 0) {
+                std::cout << "recvmsg: Read " << bytes_read << " bytes from RDMA buffer" << std::endl;
+                
+                // 设置源地址到msg结构
+                if (msg->msg_name && msg->msg_namelen >= sizeof(src_addr)) {
+                    memcpy(msg->msg_name, &src_addr, std::min(static_cast<size_t>(msg->msg_namelen), 
+                                                              sizeof(src_addr)));
+                    msg->msg_namelen = sizeof(src_addr);
+                    
+                    // 打印源地址信息
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &src_addr.sin_addr, ip_str, sizeof(ip_str));
+                    std::cout << "recvmsg: From " << ip_str << ":" << ntohs(src_addr.sin_port) << std::endl;
+                }
+                
+                // 成功从缓冲区读取数据后，发布一个新的接收WR
+                if (m_rdma_manager->recv_buffer().available_blocks() > 0) {
+                    m_rdma_manager->post_recv(1);
+                }
+                
+                return bytes_read;
+            }
+            
+            // 如果bytes_read < 0，说明缓冲区太小，返回错误
+            if (bytes_read < 0) {
+                std::cerr << "recvmsg: Buffer too small for data" << std::endl;
+                errno = EMSGSIZE;
+                return -1;
+            }
+        }
+    }
+    
+    // 3. 如果没有数据，根据flags决定行为
+    if (flags & MSG_DONTWAIT) {
+        // 非阻塞模式，立即返回
+        std::cout << "recvmsg: Non-blocking mode, no data available" << std::endl;
+        errno = EAGAIN;
+        return -1;
+    }
+    
+    // 4. 阻塞模式：设置socket为非阻塞，然后轮询等待
+    // 保存原始socket标志
+    int original_flags = orig_os_api.fcntl(m_fd, F_GETFL, 0);
+    if (original_flags == -1) {
+        perror("recvmsg: fcntl(F_GETFL) failed");
+        errno = EBADF;
+        return -1;
+    }
+    
+    // 临时设置为非阻塞
+    if (orig_os_api.fcntl(m_fd, F_SETFL, original_flags | O_NONBLOCK) == -1) {
+        perror("recvmsg: fcntl(F_SETFL) failed");
+        errno = EBADF;
+        return -1;
+    }
+    
+    // 5. 轮询等待：交替检查接收缓冲区和UDP socket
+    const int MAX_WAIT_MS = 5000;  // 最大等待5秒
+    const int CHECK_INTERVAL_US = 1000;  // 每次检查间隔1ms
+    int total_wait_us = 0;
+    
+    std::cout << "recvmsg: Entering polling loop (max " << MAX_WAIT_MS << " ms)" << std::endl;
+    
+    while (total_wait_us < MAX_WAIT_MS * 1000) {
+        // 首先检查RDMA接收缓冲区
+        if (m_rdma_initialized) {
+            if (m_rdma_manager->recv_buffer().has_data()) {
+                std::cout << "recvmsg: Found data in RDMA buffer during polling" << std::endl;
+                
+                // 准备源地址缓冲区
+                sockaddr_in src_addr;
+                socklen_t addrlen = sizeof(src_addr);
+                
+                // 直接从接收缓冲区读取数据
+                ssize_t bytes_read = m_rdma_manager->recv_buffer().read_block(
+                    buf, nbytes, reinterpret_cast<sockaddr*>(&src_addr), &addrlen);
+                
+                if (bytes_read > 0) {
+                    // 恢复socket标志
+                    orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
+                    
+                    // 设置源地址到msg结构
+                    if (msg->msg_name && msg->msg_namelen >= sizeof(src_addr)) {
+                        memcpy(msg->msg_name, &src_addr, std::min(static_cast<size_t>(msg->msg_namelen), 
+                                                                  sizeof(src_addr)));
+                        msg->msg_namelen = sizeof(src_addr);
+                    }
+                    
+                    std::cout << "recvmsg: Read " << bytes_read << " bytes after polling" << std::endl;
+                    
+                    // 成功从缓冲区读取数据后，发布一个新的接收WR
+                    if (m_rdma_manager->recv_buffer().available_blocks() > 0) {
+                        m_rdma_manager->post_recv(1);
+                    }
+                    
+                    return bytes_read;
+                }
+                
+                // 如果bytes_read < 0，说明缓冲区太小
+                if (bytes_read < 0) {
+                    orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
+                    std::cerr << "recvmsg: Buffer too small for data" << std::endl;
+                    errno = EMSGSIZE;
+                    return -1;
+                }
+            }
+        }
+        
+        // 然后检查UDP socket是否有数据（非阻塞）
+        char temp_buf[65536];
+        sockaddr_storage temp_addr;
+        socklen_t temp_addrlen = sizeof(temp_addr);
+        
+        ssize_t recv_len = orig_os_api.recvfrom(m_fd, temp_buf, sizeof(temp_buf), 
+                                     MSG_DONTWAIT, 
+                                     reinterpret_cast<sockaddr*>(&temp_addr), &temp_addrlen);
+        
+        if (recv_len > 0) {
+            std::cout << "recvmsg: Received " << recv_len << " bytes via UDP" << std::endl;
+            
+            // 处理UDP元数据
+            sockaddr_in& src_addr_in = *reinterpret_cast<sockaddr_in*>(&temp_addr);
+            ssize_t handled_len = handle_udp_metadata(temp_buf, recv_len, src_addr_in, temp_addrlen);
+            
+            if (handled_len > 0) {
+                std::cout << "recvmsg: Handled UDP metadata, continue polling" << std::endl;
+            }
+            
+            // 注意：我们不在这里恢复socket标志，因为要继续轮询
+            continue;
+        } else if (recv_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            // 真正的错误
+            std::cerr << "recvmsg: UDP recvfrom error: " << strerror(errno) << std::endl;
+            orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
+            return -1;
+        }
+        
+        // 等待一小段时间再检查
+        usleep(CHECK_INTERVAL_US);
+        total_wait_us += CHECK_INTERVAL_US;
+        
+        // 定期打印等待状态
+        if (total_wait_us % 1000000 == 0) {  // 每1秒打印一次
+            std::cout << "recvmsg: Waiting for " << (total_wait_us / 1000000) << " seconds..." << std::endl;
+        }
+    }
+    
+    // 恢复socket标志
+    orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
+    
+    // 超时
+    std::cout << "recvmsg: Timeout after " << MAX_WAIT_MS << " ms" << std::endl;
+    errno = EAGAIN;
+    return -1;
+}
+
+
+ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
+    // 1. 参数检查
+    if (!msg || !msg->msg_iov || msg->msg_iovlen == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    // 2. 提取目标地址
+    const struct sockaddr_in* to_addr = nullptr;
+    std::string target_ip;
+    int target_port = 0;
+    
+    if (msg->msg_name && msg->msg_namelen >= sizeof(struct sockaddr_in)) {
+        to_addr = reinterpret_cast<const struct sockaddr_in*>(msg->msg_name);
+        if (to_addr->sin_family != AF_INET) {
+            errno = EAFNOSUPPORT;
+            return -1;
+        }
+        
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &to_addr->sin_addr, ip_str, sizeof(ip_str));
+        target_ip = ip_str;
+        target_port = ntohs(to_addr->sin_port);
+        
+        std::cout << "sendmsg: Sending to " << target_ip << ":" << target_port 
+                  << ", buffer segments: " << msg->msg_iovlen << std::endl;
+    } else if (m_isConnected) {
+        // 使用已连接的目标地址
+        to_addr = &m_defaultDestAddr;
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &to_addr->sin_addr, ip_str, sizeof(ip_str));
+        target_ip = ip_str;
+        target_port = ntohs(to_addr->sin_port);
+        
+        std::cout << "sendmsg: Sending to connected address " << target_ip << ":" << target_port 
+                  << ", buffer segments: " << msg->msg_iovlen << std::endl;
+    } else {
+        // 没有目标地址
+        std::cerr << "sendmsg: No destination address provided and socket is not connected" << std::endl;
+        errno = EDESTADDRREQ;
+        return -1;
+    }
+    
+    // 3. 计算总数据长度
+    size_t total_len = 0;
+    for (size_t i = 0; i < msg->msg_iovlen; i++) {
+        total_len += msg->msg_iov[i].iov_len;
+    }
+    
+    if (total_len == 0) {
+        std::cout << "sendmsg: Zero-length message, skipping" << std::endl;
+        return 0;
+    }
+    
+    std::cout << "sendmsg: Total data size: " << total_len << " bytes" << std::endl;
+    
+    // 4. 检查是否已经和对端交换过元数据
+    auto& peer_manager = GlobalPeerManager::instance();
+    const PeerInfo* peer = peer_manager.get_peer(target_ip, target_port);
+    
+    if (!peer) {
+        // 第一次通信，需要交换RDMA元数据
+        std::cout << "First communication with " << target_ip << ":" << target_port 
+                  << " via sendmsg, exchanging RDMA metadata..." << std::endl;
+        
+        // 在这里调用 establish_rdma_connection
+        if (!establish_rdma_connection(target_ip.c_str(), target_port, 
+                                      reinterpret_cast<const struct sockaddr*>(to_addr))) {
+            std::cerr << "Failed to establish RDMA connection via sendmsg, falling back to normal UDP" << std::endl;
+            
+            // 如果建立RDMA连接失败，回退到普通UDP发送
+            // 注意：需要将所有缓冲区数据合并发送
+            return fallback_to_normal_sendmsg(msg, flags, to_addr);
+        }
+         
+        std::cout << "RDMA metadata exchange completed with " << target_ip << ":" << target_port << std::endl;
+        
+        // 重新获取peer信息
+        peer = peer_manager.get_peer(target_ip, target_port);
+    }
+    
+    // 5. 确保RDMA管理器已初始化
+    if (!m_rdma_manager || !m_rdma_initialized) {
+        // 如果没有初始化，尝试使用本地地址初始化
+        // 注意：这里可能需要绑定一个随机端口
+        std::cout << "RDMA manager not initialized, attempting to bind..." << std::endl;
+        
+        // 尝试绑定到任意可用端口
+        struct sockaddr_in local_addr;
+        memset(&local_addr, 0, sizeof(local_addr));
+        local_addr.sin_family = AF_INET;
+        local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        local_addr.sin_port = 0;  // 让系统分配端口
+        
+        socklen_t addrlen = sizeof(local_addr);
+        // 使用 orig_os_api.bind 替代 ::bind
+        if (orig_os_api.bind(m_fd, (struct sockaddr*)&local_addr, addrlen) < 0) {
+            std::cerr << "Failed to bind socket for RDMA initialization: " << strerror(errno) << std::endl;
+            return fallback_to_normal_sendmsg(msg, flags, to_addr);
+        }
+        
+        // 获取绑定的端口
+        // 使用 orig_os_api.getsockname 替代 ::getsockname
+        if (orig_os_api.getsockname(m_fd, (struct sockaddr*)&local_addr, &addrlen) < 0) {
+            std::cerr << "Failed to get socket name after bind: " << strerror(errno) << std::endl;
+        }
+        
+        // 初始化RDMA管理器
+        if (!initRdmaManager(ntohl(local_addr.sin_addr.s_addr), ntohs(local_addr.sin_port), m_fd)) {
+            std::cerr << "Failed to initialize RDMA manager, falling back to normal UDP" << std::endl;
+            return fallback_to_normal_sendmsg(msg, flags, to_addr);
+        }
+    }
+    
+    // 6. 检查数据大小是否超过块的数据容量
+    if (total_len > m_rdma_manager->send_buffer().data_capacity()) {
+        std::cerr << "Data size " << total_len << " exceeds block capacity " 
+                  << m_rdma_manager->send_buffer().data_capacity() 
+                  << ", falling back to normal UDP" << std::endl;
+        return fallback_to_normal_sendmsg(msg, flags, to_addr);
+    }
+    
+    // 7. 将多个缓冲区的数据合并写入发送缓冲区
+    // 分配临时缓冲区存放合并后的数据
+    std::unique_ptr<char[]> temp_buffer(new char[total_len]);
+    char* dest_ptr = temp_buffer.get();
+    
+    for (size_t i = 0; i < msg->msg_iovlen; i++) {
+        memcpy(dest_ptr, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len);
+        dest_ptr += msg->msg_iov[i].iov_len;
+    }
+    
+    // 8. 将合并后的数据写入RDMA发送缓冲区
+    if (!m_rdma_manager->send_buffer().write_block(temp_buffer.get(), total_len)) {
+        std::cerr << "Failed to write data to RDMA send buffer, buffer may be full" << std::endl;
+        errno = EAGAIN;
+        return -1;
+    }
+    
+    // 9. 使用RDMA UD发送数据
+    bool rdma_success = post_send_to_peer(peer, total_len);
+    
+    if (!rdma_success) {
+        std::cerr << "RDMA send failed via sendmsg, falling back to normal UDP" << std::endl;
+        return fallback_to_normal_sendmsg(msg, flags, to_addr);
+    }
+    
+    std::cout << "sendmsg: Successfully sent " << total_len 
+              << " bytes via RDMA to " << target_ip << ":" << target_port << std::endl;
+    
+    return total_len;
+}
+
+// 回退到普通UDP sendmsg的辅助函数
+ssize_t Socket_tb_udp::fallback_to_normal_sendmsg(const struct msghdr *msg, int flags, 
+                                                  const struct sockaddr_in* to_addr) {
+    // 准备发送消息的副本
+    struct msghdr send_msg;
+    memcpy(&send_msg, msg, sizeof(struct msghdr));
+    
+    // 如果需要目标地址，设置目标地址
+    if (to_addr && !msg->msg_name) {
+        send_msg.msg_name = const_cast<struct sockaddr_in*>(to_addr);
+        send_msg.msg_namelen = sizeof(struct sockaddr_in);
+    }
+    
+    // 使用 orig_os_api.sendmsg 替代 ::sendmsg
+    ssize_t result = orig_os_api.sendmsg(m_fd, &send_msg, flags);
+    
+    if (result < 0) {
+        std::cerr << "Normal UDP sendmsg failed: " << strerror(errno) << std::endl;
+    } else {
+        std::cout << "Normal UDP sendmsg succeeded, sent " << result << " bytes" << std::endl;
+    }
+    
+    return result;
+}
+
+
+int Socket_tb_udp::ioctl(unsigned long int __request, unsigned long int __arg){
+	return orig_os_api.ioctl(m_fd, __request, __arg);
+}
+
+int Socket_tb_udp::setsockopt(int __level, int __optname,  __const void *__optval, socklen_t __optlen){
+	return orig_os_api.setsockopt(m_fd, __level, __optname, __optval, __optlen);
+}
+
+int Socket_tb_udp::getsockopt(int __level, int __optname, void *__optval, socklen_t *__optlen) {
+    if (!__optval || !__optlen) {
+        errno = EFAULT;
+        return -1;
+    }
+    
+    // 如果底层有真实的socket文件描述符，对未处理的level使用原始系统调用
+    if (m_fd >= 0) {
+        // 处理三个特定的level，其他都直接调用系统调用
+        switch (__level) {
+            case SOL_SOCKET: {  // 1
+                return handle_socket_options(__optname, __optval, __optlen);
+            }
+            
+            case IPPROTO_IP: {  // 0
+                return handle_ip_options(__optname, __optval, __optlen);
+            }
+            
+            case 270: {  // 不知道dds设置的什么级别，不管
+                return orig_os_api.getsockopt(m_fd, __level, __optname, __optval, __optlen);
+            }
+            
+            default: {
+                // 其他情况使用原始系统调用
+                return orig_os_api.getsockopt(m_fd, __level, __optname, __optval, __optlen);
+            }
+        }
+    } else {
+        std::cout << "something wrong happen" << std::endl;
+    }
+}
+
+// 处理SOL_SOCKET级别选项
+int Socket_tb_udp::handle_socket_options(int optname, void *optval, socklen_t *optlen) {
+    int m_fd = get_fd();
+    
+    // 检查缓冲区大小
+    if (!optval || !optlen) {
+        errno = EFAULT;
+        return -1;
+    }
+    
+    // 根据选项名称处理
+    switch (optname) {
+        case SO_TYPE: {
+            // 返回socket类型 - SOCK_DGRAM
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            int type = SOCK_DGRAM;
+            memcpy(optval, &type, sizeof(type));
+            *optlen = sizeof(type);
+            return 0;
+        }
+        
+        case SO_ERROR: {
+            // 返回socket错误状态
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            int error = 0; // 假设没有错误
+            memcpy(optval, &error, sizeof(error));
+            *optlen = sizeof(error);
+            return 0;
+        }
+        
+        case SO_BROADCAST: {
+            // 返回广播设置
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            int broadcast = m_broadcastEnabled ? 1 : 0;
+            memcpy(optval, &broadcast, sizeof(broadcast));
+            *optlen = sizeof(broadcast);
+            return 0;
+        }
+        
+        case SO_REUSEADDR: {
+            // 如果有底层socket，从系统获取
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, SOL_SOCKET, SO_REUSEADDR, optval, optlen);
+            }
+            // 否则返回默认值
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            int reuse = 1; // 默认启用地址重用
+            memcpy(optval, &reuse, sizeof(reuse));
+            *optlen = sizeof(reuse);
+            return 0;
+        }
+        
+        case SO_REUSEPORT: {
+            // 如果有底层socket，从系统获取
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, SOL_SOCKET, SO_REUSEPORT, optval, optlen);
+            }
+            // 否则返回默认值
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            int reuse = 0; // 默认不启用端口重用
+            memcpy(optval, &reuse, sizeof(reuse));
+            *optlen = sizeof(reuse);
+            return 0;
+        }
+        
+        case SO_RCVBUF: {
+            // 如果有RDMA管理器，返回RDMA接收缓冲区大小
+            if (m_rdma_manager && m_rdma_manager->isInitialized()) {
+                if (*optlen < sizeof(int)) {
+                    errno = EINVAL;
+                    return -1;
+                }
+                int rcvbuf = m_rdma_manager->recv_buffer().get_buffer_size();
+                memcpy(optval, &rcvbuf, sizeof(rcvbuf));
+                *optlen = sizeof(rcvbuf);
+                return 0;
+            } else if (m_fd >= 0) {
+                // 否则从底层socket获取
+                return orig_os_api.getsockopt(m_fd, SOL_SOCKET, SO_RCVBUF, optval, optlen);
+            } else {
+                // 默认值
+                if (*optlen < sizeof(int)) {
+                    errno = EINVAL;
+                    return -1;
+                }
+                int rcvbuf = 131072; // 128KB
+                memcpy(optval, &rcvbuf, sizeof(rcvbuf));
+                *optlen = sizeof(rcvbuf);
+                return 0;
+            }
+        }
+        
+        case SO_SNDBUF: {
+            // 如果有RDMA管理器，返回RDMA发送缓冲区大小
+            if (m_rdma_manager && m_rdma_manager->isInitialized()) {
+                if (*optlen < sizeof(int)) {
+                    errno = EINVAL;
+                    return -1;
+                }
+                int sndbuf = m_rdma_manager->send_buffer().get_buffer_size();
+                memcpy(optval, &sndbuf, sizeof(sndbuf));
+                *optlen = sizeof(sndbuf);
+                return 0;
+            } else if (m_fd >= 0) {
+                // 否则从底层socket获取
+                return orig_os_api.getsockopt(m_fd, SOL_SOCKET, SO_SNDBUF, optval, optlen);
+            } else {
+                // 默认值
+                if (*optlen < sizeof(int)) {
+                    errno = EINVAL;
+                    return -1;
+                }
+                int sndbuf = 131072; // 128KB
+                memcpy(optval, &sndbuf, sizeof(sndbuf));
+                *optlen = sizeof(sndbuf);
+                return 0;
+            }
+        }
+        
+        case SO_RCVTIMEO: {
+            // 如果有底层socket，从系统获取
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, SOL_SOCKET, SO_RCVTIMEO, optval, optlen);
+            }
+            // 如果没有底层socket，返回0表示没有超时
+            if (*optlen >= sizeof(struct timeval)) {
+                struct timeval tv = {0, 0};
+                memcpy(optval, &tv, sizeof(tv));
+                *optlen = sizeof(tv);
+                return 0;
+            } else if (*optlen >= sizeof(struct timespec)) {
+                struct timespec ts = {0, 0};
+                memcpy(optval, &ts, sizeof(ts));
+                *optlen = sizeof(ts);
+                return 0;
+            } else {
+                errno = EINVAL;
+                return -1;
+            }
+        }
+        
+        case SO_SNDTIMEO: {
+            // 如果有底层socket，从系统获取
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, SOL_SOCKET, SO_SNDTIMEO, optval, optlen);
+            }
+            // 如果没有底层socket，返回0表示没有超时
+            if (*optlen >= sizeof(struct timeval)) {
+                struct timeval tv = {0, 0};
+                memcpy(optval, &tv, sizeof(tv));
+                *optlen = sizeof(tv);
+                return 0;
+            } else if (*optlen >= sizeof(struct timespec)) {
+                struct timespec ts = {0, 0};
+                memcpy(optval, &ts, sizeof(ts));
+                *optlen = sizeof(ts);
+                return 0;
+            } else {
+                errno = EINVAL;
+                return -1;
+            }
+        }
+        
+        // 处理其他常见的socket选项
+        case SO_KEEPALIVE:
+        case SO_DONTROUTE:
+        case SO_LINGER:
+        case SO_OOBINLINE:
+        case SO_ACCEPTCONN:
+        case SO_DEBUG: {
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, SOL_SOCKET, optname, optval, optlen);
+            }
+            // 对于UDP socket，这些选项通常不相关，返回0或适当默认值
+            if (*optlen >= sizeof(int)) {
+                int value = 0;
+                memcpy(optval, &value, sizeof(value));
+                *optlen = sizeof(value);
+                return 0;
+            }
+            errno = EINVAL;
+            return -1;
+        }
+        
+        case SO_DOMAIN: {
+            // 返回地址族
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            int domain = AF_INET; // 假设IPv4
+            memcpy(optval, &domain, sizeof(domain));
+            *optlen = sizeof(domain);
+            return 0;
+        }
+        
+        case SO_PROTOCOL: {
+            // 返回协议
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            int protocol = IPPROTO_UDP;
+            memcpy(optval, &protocol, sizeof(protocol));
+            *optlen = sizeof(protocol);
+            return 0;
+        }
+        
+        // UDP特定选项，虽然不在SOL_SOCKET级别，但有些应用可能错误地查询
+        case UDP_CORK:
+        case UDP_SEGMENT:
+        case UDP_GRO: {
+            // 这些应该是IPPROTO_UDP级别的选项
+            // 返回未实现的协议选项错误
+            errno = ENOPROTOOPT;
+            return -1;
+        }
+        
+        default: {
+            // 未知的socket选项，如果有底层socket，尝试系统调用
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, SOL_SOCKET, optname, optval, optlen);
+            }
+            // 没有底层socket，返回未实现
+            errno = ENOPROTOOPT;
+            return -1;
+        }
+    }
+}
+
+// 处理IPPROTO_IP级别选项
+int Socket_tb_udp::handle_ip_options(int optname, void *optval, socklen_t *optlen) {
+    int m_fd = get_fd();
+    
+    // 检查缓冲区大小
+    if (!optval || !optlen) {
+        errno = EFAULT;
+        return -1;
+    }
+    
+    switch (optname) {
+        case IP_TTL: {
+            // 返回TTL值
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, IPPROTO_IP, IP_TTL, optval, optlen);
+            }
+            int ttl = 64; // 默认TTL
+            memcpy(optval, &ttl, sizeof(ttl));
+            *optlen = sizeof(ttl);
+            return 0;
+        }
+        
+        case IP_TOS: {
+            // 返回服务类型
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, IPPROTO_IP, IP_TOS, optval, optlen);
+            }
+            int tos = 0; // 默认TOS
+            memcpy(optval, &tos, sizeof(tos));
+            *optlen = sizeof(tos);
+            return 0;
+        }
+        
+        case IP_MULTICAST_TTL: {
+            // 返回多播TTL
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, IPPROTO_IP, IP_MULTICAST_TTL, optval, optlen);
+            }
+            int multicast_ttl = 1; // 默认多播TTL
+            memcpy(optval, &multicast_ttl, sizeof(multicast_ttl));
+            *optlen = sizeof(multicast_ttl);
+            return 0;
+        }
+        
+        case IP_MULTICAST_LOOP: {
+            // 返回多播回环设置
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, IPPROTO_IP, IP_MULTICAST_LOOP, optval, optlen);
+            }
+            int loop = 1; // 默认启用多播回环
+            memcpy(optval, &loop, sizeof(loop));
+            *optlen = sizeof(loop);
+            return 0;
+        }
+        
+        case IP_MULTICAST_IF: {
+            // 返回多播接口
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, IPPROTO_IP, IP_MULTICAST_IF, optval, optlen);
+            }
+            // 如果没有设置，返回默认值
+            struct in_addr addr;
+            addr.s_addr = INADDR_ANY;
+            if (*optlen >= sizeof(struct in_addr)) {
+                memcpy(optval, &addr, sizeof(addr));
+                *optlen = sizeof(addr);
+                return 0;
+            }
+            errno = EINVAL;
+            return -1;
+        }
+        
+        case IP_PKTINFO: {
+            // 返回包信息设置
+            if (*optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, IPPROTO_IP, IP_PKTINFO, optval, optlen);
+            }
+            int pktinfo = 0; // 默认不启用
+            memcpy(optval, &pktinfo, sizeof(pktinfo));
+            *optlen = sizeof(pktinfo);
+            return 0;
+        }
+        
+        case IP_OPTIONS: {
+            // IP选项
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, IPPROTO_IP, IP_OPTIONS, optval, optlen);
+            }
+            // 对于纯RDMA实现，通常没有IP选项
+            if (*optlen >= 1) {
+                // 返回空选项
+                memset(optval, 0, 1);
+                *optlen = 0;
+                return 0;
+            }
+            errno = EINVAL;
+            return -1;
+        }
+        
+        default: {
+            // 其他IP选项，如果有底层socket，尝试系统调用
+            if (m_fd >= 0) {
+                return orig_os_api.getsockopt(m_fd, IPPROTO_IP, optname, optval, optlen);
+            }
+            // 没有底层socket，返回未实现
+            errno = ENOPROTOOPT;
+            return -1;
+        }
+    }
 }
 
 

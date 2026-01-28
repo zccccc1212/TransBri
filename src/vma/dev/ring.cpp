@@ -1766,6 +1766,7 @@ bool UDRdmaManager::updateLocalAddress(uint32_t new_local_ip, uint16_t new_local
     
     // 重新配置发送缓冲区
     if (send_buffer_) {
+        send_buffer_->update_local_address(new_local_ip, new_local_port);
         // 注意：这里可能需要重新创建或重新配置SequentialUdpBuffer
         // 或者SequentialUdpBuffer应该支持动态更新本地地址
         // 暂时记录警告

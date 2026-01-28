@@ -235,6 +235,10 @@ public:
     ssize_t recvfrom(void *buf, size_t nbytes, int flags,
                      sockaddr *srcAddr, socklen_t *addrlen);
 
+    ssize_t sendmsg(const struct msghdr *msg, int flags);
+    
+    ssize_t recvmsg(struct msghdr *__msg, int __flags);
+
     // 地址绑定
     void extractAddressFromSockaddr(const sockaddr_in *addr) {
         if (!addr || addr->sin_family != AF_INET) {
@@ -255,6 +259,15 @@ public:
             m_isBound = false;
         }
     }
+
+    virtual int getsockopt(int __level, int __optname, void *__optval,
+			       socklen_t *__optlen);
+    
+    virtual int ioctl(unsigned long int __request, unsigned long int __arg) = 0;
+
+    virtual int setsockopt(int __level, int __optname,
+			       __const void *__optval, socklen_t __optlen);
+
 
     bool isBound() const { return m_isBound; }
 
@@ -363,7 +376,12 @@ public:
     
     ssize_t recvfrom(void *buf, size_t nbytes, int flags,
                      sockaddr *srcAddr, socklen_t *addrlen);
-    
+
+    ssize_t sendmsg(const struct msghdr *msg, int flags);
+                     
+    ssize_t fallback_to_normal_sendmsg(const struct msghdr *msg, int flags, 
+                                                  const struct sockaddr_in* to_addr)
+
     bool establish_rdma_connection(const char* remote_ip, int remote_port,
                                  const struct sockaddr* to_addr);
                                     
@@ -376,6 +394,14 @@ public:
 
     ssize_t handle_udp_metadata(char* temp_buf, ssize_t recv_len,
                                 sockaddr_in& src_addr, socklen_t src_len);
+
+    ssize_t recvmsg(struct msghdr *__msg, int __flags);
+
+    int getsockopt(int __level, int __optname, void *__optval, socklen_t *__optlen);
+    
+    int ioctl(unsigned long int __request, unsigned long int __arg);
+
+    int setsockopt(int __level, int __optname,  __const void *__optval, socklen_t __optlen);
 
     // 连接模式下的收发（使用connect设置默认地址后）
     ssize_t send(const void *buf, size_t nbytes, int flags = 0);
