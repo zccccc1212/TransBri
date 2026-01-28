@@ -215,6 +215,7 @@ public:
         return 0;
     }
     virtual    int listen(int backlog){
+        if(backlog)
         return 0;
     }
     virtual    int accept(){
@@ -230,37 +231,87 @@ public:
 
             // 数据收发
     virtual    ssize_t send(__const void *__buf, size_t __nbytes, int __flags){
+        if(__buf){
+            if(__nbytes){
+                if(__flags){
+
+                }
+            }
+        }
         return 0;
     }
     virtual    ssize_t recv(void *buf, size_t nbytes, int flags = 0){
+        if(__buf){
+            if(__nbytes){
+                if(__flags){
+                    
+                }
+            }
+        }
         return 0;
     }
         
             // 便捷读写接口
     virtual    ssize_t write(__const void *__buf, size_t __nbytes){
+        if(__buf){
+            if(__nbytes){
+            
+            }
+        }
         return 0;
     }
     virtual    ssize_t read(void *buf, size_t nbytes){
+        if(__buf){
+            if(__nbytes){
+                
+            }
+        }
         return 0;
     }
 
         // UDP数据收发
     ssize_t sendto(__const void *__buf, size_t __nbytes, int __flags,
 	       const struct sockaddr *__to, socklen_t __tolen){
+        if(__buf){
+            if(__nbytes){
+                if(__flags){
+                    if(__to || __tolen)
+                }
+            }
+        }
         return 0;
     }
     //note !! sendto sendmsg类似的中，都默认了bind的操作，如果这个套接字没有和某个ip地址和端口绑定的话，此时会默认绑定
     
     ssize_t recvfrom(void *buf, size_t nbytes, int flags,
                      sockaddr *srcAddr, socklen_t *addrlen){
+        if(buf){
+            if(nbytes){
+                if(flags){
+                    if(srcAddr || addrlen){
+
+                    }
+                }
+            }
+        }
         return 0;
     }
 
     ssize_t sendmsg(const struct msghdr *msg, int flags){
+        if(msg){
+            if(flags){
+
+            }
+        }
         return 0;
     }
     
     ssize_t recvmsg(struct msghdr *__msg, int __flags){
+        if(__msg){
+            if(__flags){
+
+            }
+        }
         return 0;
     }
 
@@ -286,17 +337,40 @@ public:
     }
 
     virtual int getsockopt(int __level, int __optname, void *__optval,
-			       socklen_t *__optlen){
-        return 0;
+                       socklen_t *__optlen) {
+        // 最基本的参数检查
+        if (!__optval || !__optlen) {
+            return -1;  // 设置errno
+        }
+        // 避免未使用参数警告
+        (void)__level;
+        (void)__optname;
+        (void)__optval;
+        (void)__optlen;
+        return 0;  // 总是成功
     }
-    
-    virtual int ioctl(unsigned long int __request, unsigned long int __arg){
-        return 0;
+
+    virtual int ioctl(unsigned long int __request, unsigned long int __arg) {
+        // 最简单的实现
+        (void)__request;  // 避免未使用参数警告
+        (void)__arg;      // 避免未使用参数警告
+        return 0;         // 总是成功
     }
 
     virtual int setsockopt(int __level, int __optname,
-			       __const void *__optval, socklen_t __optlen){
-        return 0;
+                           const void *__optval, socklen_t __optlen) {
+        // 最基本的参数检查
+        if (!__optval && __optlen > 0) {
+            return -1;  // 设置errno
+        }
+
+        // 避免未使用参数警告
+        (void)__level;
+        (void)__optname;
+        (void)__optval;
+        (void)__optlen;
+
+        return 0;  // 总是成功
     }
 
 
@@ -365,12 +439,6 @@ public:
     // 状态查询
     bool isListening() const { return m_isListening; }
     bool isConnected() const { return m_isConnected; }
-    
-    // 连接信息
-    int getLocalPort() const;
-    int getRemotePort() const;
-    std::string getLocalAddress() const;
-    std::string getRemoteAddress() const;
 
 private:
     bool m_isListening;
@@ -399,8 +467,15 @@ public:
     int bind();
 
     // UDP连接（伪连接，设置默认目标地址）
-    int connect(const sockaddr *addr, socklen_t addrlen);
-    int disconnect();  // 断开伪连接
+    int connect(const sockaddr *addr, socklen_t addrlen){
+        if(addr || addrlen){
+            
+        }
+        return 0;
+    };
+    int disconnect(){
+        return 0;
+    }  // 断开伪连接
     
     // UDP数据收发
     ssize_t sendto(__const void *__buf, size_t __nbytes, int __flags,

@@ -1750,7 +1750,7 @@ public:
     
     // 允许移动构造和移动赋值
     UDRdmaManager(UDRdmaManager&& other) noexcept;
-    UDRdmaManager& operator=(UDRdmaManager&& other) noexcept;
+   // UDRdmaManager& operator=(UDRdmaManager&& other) noexcept;
     
     // 初始化RDMA资源
     bool initialize(uint32_t local_ip, uint16_t local_port, int sockfd,
