@@ -1673,7 +1673,7 @@ void UDRdmaManager::setLastError(int errnum) {
 std::atomic<uint64_t> UDRdmaManager::wr_id_counter_{0};
 
 size_t UDRdmaManager::post_recv(size_t n) {
-    if (!m_initialized || !m_resources.qp) {
+    if (!m_resources.qp) {
         setLastError("RDMA manager not initialized or QP not available");
         return 0;
     }
@@ -1682,7 +1682,7 @@ size_t UDRdmaManager::post_recv(size_t n) {
         return 0;
     }
     
-    std::lock_guard<std::mutex> lock(m_mutex);
+    //std::lock_guard<std::mutex> lock(m_mutex);
     
     size_t posted_count = 0;
     

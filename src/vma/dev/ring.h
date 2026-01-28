@@ -1785,10 +1785,10 @@ public:
     // ============ 缓冲区信息 ============
 
     uint32_t getSendBufferLkey() const { 
-        return m_resources.memory.send_mr ? m_resources.memory.send_mr->lkey : 0; 
+        return send_mr_ ? send_mr_->lkey : 0; 
     }
     uint32_t getRecvBufferLkey() const { 
-        return m_resources.memory.recv_mr ? m_resources.memory.recv_mr->lkey : 0; 
+        return recv_mr_ ? recv_mr_->lkey : 0; 
     }
     
     // 分配和注册内存区域

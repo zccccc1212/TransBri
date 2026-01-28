@@ -3391,10 +3391,12 @@ ssize_t Socket_tb_tcp::recv(void *__buf, size_t __nbytes, int __flags) {
 
 //Socket_tb_udp impl
 Socket_tb_udp::Socket_tb_udp(int fd) 
-    : Socket_transbridge(fd)  // 调用基类构造函数
+    : Socket_transbridge(fd) , // 调用基类构造函数,
+	m_rdma_manager(nullptr)
 {
     setType(SOCKET_TYPE_UDP);
 	m_rdma_initialized = false;
+	m_isBound = false;
     // 子类特有的初始化代码
 }
 
@@ -3443,7 +3445,7 @@ int Socket_tb_udp::bind() {
     }
 
     
-
+	m_isBound = true;
     m_rdma_initialized = true;
     std::cout << "RDMA manager initialized successfully after bind" << std::endl;
     
