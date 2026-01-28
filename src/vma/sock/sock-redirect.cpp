@@ -4445,12 +4445,12 @@ int Socket_tb_udp::getsockopt(int __level, int __optname, void *__optval, sockle
         }
     } else {
         std::cout << "something wrong happen" << std::endl;
+		return 0;
     }
 }
 
 // 处理SOL_SOCKET级别选项
 int Socket_tb_udp::handle_socket_options(int optname, void *optval, socklen_t *optlen) {
-    int m_fd = get_fd();
     
     // 检查缓冲区大小
     if (!optval || !optlen) {
@@ -4535,7 +4535,7 @@ int Socket_tb_udp::handle_socket_options(int optname, void *optval, socklen_t *o
                     errno = EINVAL;
                     return -1;
                 }
-                int rcvbuf = m_rdma_manager->recv_buffer().get_buffer_size();
+                int rcvbuf = m_rdma_manager->recv_buffer().buffer_size();
                 memcpy(optval, &rcvbuf, sizeof(rcvbuf));
                 *optlen = sizeof(rcvbuf);
                 return 0;
@@ -4562,7 +4562,7 @@ int Socket_tb_udp::handle_socket_options(int optname, void *optval, socklen_t *o
                     errno = EINVAL;
                     return -1;
                 }
-                int sndbuf = m_rdma_manager->send_buffer().get_buffer_size();
+                int sndbuf = m_rdma_manager->send_buffer().buffer_size();
                 memcpy(optval, &sndbuf, sizeof(sndbuf));
                 *optlen = sizeof(sndbuf);
                 return 0;
@@ -4671,16 +4671,6 @@ int Socket_tb_udp::handle_socket_options(int optname, void *optval, socklen_t *o
             return 0;
         }
         
-        // UDP特定选项，虽然不在SOL_SOCKET级别，但有些应用可能错误地查询
-        case UDP_CORK:
-        case UDP_SEGMENT:
-        case UDP_GRO: {
-            // 这些应该是IPPROTO_UDP级别的选项
-            // 返回未实现的协议选项错误
-            errno = ENOPROTOOPT;
-            return -1;
-        }
-        
         default: {
             // 未知的socket选项，如果有底层socket，尝试系统调用
             if (m_fd >= 0) {
@@ -4695,7 +4685,6 @@ int Socket_tb_udp::handle_socket_options(int optname, void *optval, socklen_t *o
 
 // 处理IPPROTO_IP级别选项
 int Socket_tb_udp::handle_ip_options(int optname, void *optval, socklen_t *optlen) {
-    int m_fd = get_fd();
     
     // 检查缓冲区大小
     if (!optval || !optlen) {

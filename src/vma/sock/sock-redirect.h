@@ -207,9 +207,6 @@ public:
     // 通用接口
     
     virtual int close();
-    virtual int setsockopt(int level, int optname, const void *optval, socklen_t optlen);
-    virtual int getsockopt(int level, int optname, void *optval, socklen_t *optlen);
-    
     
 
     virtual    int socket();
@@ -263,7 +260,7 @@ public:
     virtual int getsockopt(int __level, int __optname, void *__optval,
 			       socklen_t *__optlen);
     
-    virtual int ioctl(unsigned long int __request, unsigned long int __arg) = 0;
+    virtual int ioctl(unsigned long int __request, unsigned long int __arg);
 
     virtual int setsockopt(int __level, int __optname,
 			       __const void *__optval, socklen_t __optlen);
@@ -380,7 +377,7 @@ public:
     ssize_t sendmsg(const struct msghdr *msg, int flags);
                      
     ssize_t fallback_to_normal_sendmsg(const struct msghdr *msg, int flags, 
-                                                  const struct sockaddr_in* to_addr)
+                                                  const struct sockaddr_in* to_addr);
 
     bool establish_rdma_connection(const char* remote_ip, int remote_port,
                                  const struct sockaddr* to_addr);
@@ -402,6 +399,11 @@ public:
     int ioctl(unsigned long int __request, unsigned long int __arg);
 
     int setsockopt(int __level, int __optname,  __const void *__optval, socklen_t __optlen);
+
+    int handle_ip_options(int optname, void *optval, socklen_t *optlen);
+    int handle_socket_options(int optname, void *optval, socklen_t *optlen);
+
+
 
     // 连接模式下的收发（使用connect设置默认地址后）
     ssize_t send(const void *buf, size_t nbytes, int flags = 0);
