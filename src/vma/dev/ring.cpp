@@ -964,7 +964,7 @@ bool CQManager::createSharedCQs(ibv_context* context,
 
 // 启动轮询线程
 void CQManager::startPollingThreads() {
-    if (m_polling_stop) {
+    
         m_polling_stop = false;
         
         // 启动发送CQ轮询线程
@@ -978,7 +978,7 @@ void CQManager::startPollingThreads() {
             m_recv_polling_thread = std::thread(&CQManager::recvPollingThread, this);
             std::cout << "Started recv CQ polling thread" << std::endl;
         }
-    }
+    
 }
 // 发送轮询线程函数
 void CQManager::sendPollingThread() {
@@ -1818,7 +1818,7 @@ bool UDRdmaManager::queryGid() {
 
 SequentialUdpBuffer::SequentialUdpBuffer(uint32_t local_ip, uint16_t local_port,
                                          size_t block_count)
-    : buffer_(block_count * BLOCK_TOTAL_SIZE),
+    : buffer_(block_count * BLOCK_TOTAL_SIZE, 0),
       block_valid_(block_count, false),
       block_count_(block_count),
       local_ip_(local_ip),
@@ -1915,9 +1915,7 @@ bool SequentialUdpBuffer::write_block(const void* data, size_t len) {
     // 标记块为有效
     block_valid_[current_tail] = true;
     
-    // 更新tail指针（环形）
-    size_t next_tail = (current_tail + 1) % block_count_;
-    tail_.store(next_tail, std::memory_order_release);
+
     
     // 增加已使用块数
     used_blocks_.fetch_add(1, std::memory_order_release);
@@ -1965,7 +1963,7 @@ ssize_t SequentialUdpBuffer::read_block(void *buf, size_t nbytes,
     size_t current_head = head_.load(std::memory_order_acquire);
     
     // 计算块在缓冲区中的偏移
-    size_t block_offset_bytes = current_head * BLOCK_TOTAL_SIZE;
+    size_t block_offset_bytes = current_head * BLOCK_TOTAL_SIZE + 40; //!!!!
     
     // 读取头部信息
     BlockHeader* header = reinterpret_cast<BlockHeader*>(&buffer_[block_offset_bytes]);
@@ -2057,8 +2055,12 @@ unsigned char* SequentialUdpBuffer::get_next_receive_ptr() {
 
 unsigned char* SequentialUdpBuffer::get_next_send_ptr() {
     // 发送缓冲区使用：获取下一个要发送数据的位置
-    size_t current_head = head_.load(std::memory_order_acquire);
-    return &buffer_[current_head * BLOCK_TOTAL_SIZE];
+    // 更新tail指针（环形）
+    size_t current_tail = tail_.load(std::memory_order_acquire);
+    size_t next_tail = (current_tail + 1) % block_count_;
+    tail_.store(next_tail, std::memory_order_release);
+
+    return &buffer_[current_tail * BLOCK_TOTAL_SIZE];
 }
 
 unsigned char* SequentialUdpBuffer::get_head_ptr() {

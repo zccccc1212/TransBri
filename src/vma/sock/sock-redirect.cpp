@@ -2025,6 +2025,17 @@ ssize_t sendmsg(int __fd, __const struct msghdr *__msg, int __flags)
 {
 	srdr_logfuncall_entry("fd=%d", __fd);
 
+	BULLSEYE_EXCLUDE_BLOCK_START
+	if (!orig_os_api.sendmsg) get_orig_funcs();
+	BULLSEYE_EXCLUDE_BLOCK_END
+
+	//zc add 
+	Socket_transbridge* p_socket = NULL;
+	p_socket = my_fd_collection_get_sockfd(__fd);
+	if(p_socket){
+		return p_socket->sendmsg(__msg,  __flags);
+	}
+
 	socket_fd_api* p_socket_object = NULL;
 	p_socket_object = fd_collection_get_sockfd(__fd);
 	if (p_socket_object) {
@@ -3543,8 +3554,11 @@ ssize_t Socket_tb_udp::sendto(__const void *__buf, size_t __nbytes, int __flags,
         }
          
         std::cout << "RDMA metadata exchange completed with " << ip_str << ":" << port << std::endl;
+		// 重新获取peer信息
+        peer = peer_manager.get_peer(ip_str, port);
     }
 	// 应该是先调用内核的sendto，让内核绑定到一个端口，然后再出来了才知道自己的ip地址和端口
+	
 
 	// 确保RDMA管理器已初始化
     if (!m_rdma_manager) {
@@ -3774,7 +3788,7 @@ bool Socket_tb_udp::post_send_to_peer(const PeerInfo* peer, size_t data_len) {
     }
     
     // 1. 获取发送缓冲区的下一个可读取块的数据指针
-    const unsigned char* data_ptr = m_rdma_manager->send_buffer().get_tail_ptr();
+    const unsigned char* data_ptr = m_rdma_manager->send_buffer().get_next_send_ptr();
     if (!data_ptr) {
         std::cerr << "No data available in send buffer" << std::endl;
         return false;
@@ -3831,86 +3845,45 @@ bool Socket_tb_udp::post_send_to_peer(const PeerInfo* peer, size_t data_len) {
 
 ssize_t Socket_tb_udp::recvfrom(void *buf, size_t nbytes, int flags,
                                sockaddr *srcAddr, socklen_t *addrlen) {
-    // 1. 首先检查接收缓冲区是否有数据
-	
-	if(m_rdma_initialized)
-	{
-		if(m_rdma_manager->recv_buffer().has_data()){
-			// 直接从接收缓冲区读取数据
-        	ssize_t bytes_read = m_rdma_manager->recv_buffer().read_block(
-        	    buf, nbytes, srcAddr, addrlen);
-	
-        	if (bytes_read > 0) {
-        	    // 成功从缓冲区读取数据后，发布一个新的接收WR
-        	    if (m_rdma_manager->recv_buffer().available_blocks() > 0) {
-        	        m_rdma_manager->post_recv(1);
-        	    }
-        	    return bytes_read;
-        	}
-	
-        	// 如果bytes_read < 0，说明缓冲区太小，返回错误
-        	if (bytes_read < 0) {
-        	    errno = EMSGSIZE;
-        	    return -1;
-			}
-		}    
-    }
+    // 记录是否是非阻塞模式
+    bool nonblocking = (flags & MSG_DONTWAIT) != 0;
     
-    // 2. 如果没有数据，根据flags决定行为
-    if (flags & MSG_DONTWAIT) {
-        // 非阻塞模式，立即返回
-        errno = EAGAIN;
-        return -1;
-    }
+    // 最大轮询次数（避免无限循环）
+    const int MAX_POLL_CYCLES = nonblocking ? 1 : 5000;  // 非阻塞模式只轮询一次
+    int poll_cycle = 0;
     
-    // 3. 阻塞模式：设置socket为非阻塞，然后轮询等待
-    // 保存原始socket标志
-    int original_flags = orig_os_api.fcntl(m_fd, F_GETFL, 0);
-    if (original_flags == -1) {
-        perror("fcntl(F_GETFL) failed");
-        errno = EBADF;
-        return -1;
-    }
-    
-    // 临时设置为非阻塞
-    if (orig_os_api.fcntl(m_fd, F_SETFL, original_flags | O_NONBLOCK) == -1) {
-        perror("fcntl(F_SETFL) failed");
-        errno = EBADF;
-        return -1;
-    }
-    
-    // 4. 轮询等待：交替检查接收缓冲区和UDP socket
-    const int MAX_WAIT_MS = 5000;  // 最大等待5秒
-    const int CHECK_INTERVAL_US = 1000;  // 每次检查间隔1ms
-    int total_wait_us = 0;
-    
-    while (total_wait_us < MAX_WAIT_MS * 1000) {
-        // 首先检查接收缓冲区
-		if(m_rdma_initialized)
-		{
-			if(m_rdma_manager->recv_buffer().has_data()){
-				// 直接从接收缓冲区读取数据
-        		ssize_t bytes_read = m_rdma_manager->recv_buffer().read_block(
-        		    buf, nbytes, srcAddr, addrlen);
-				// 恢复socket标志
-        	        orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
-        		if (bytes_read > 0) {
-        		    // 成功从缓冲区读取数据后，发布一个新的接收WR
-        		    if (m_rdma_manager->recv_buffer().available_blocks() > 0) {
-        		        m_rdma_manager->post_recv(1);
-        		    }
-        		    return bytes_read;
-        		}
-
-        		// 如果bytes_read < 0，说明缓冲区太小，返回错误
-        		if (bytes_read < 0) {
-        		    errno = EMSGSIZE;
-        		    return -1;
-				}
-			}    
-    	}
+    while (poll_cycle < MAX_POLL_CYCLES) {
+        poll_cycle++;
         
-        // 然后检查UDP socket是否有数据（非阻塞）
+        // ==================== 阶段1：轮询RDMA缓冲区 ====================
+        if (m_rdma_initialized && m_rdma_manager) {
+            // 检查RDMA缓冲区是否有数据
+            if (m_rdma_manager->recv_buffer().has_data()) {
+                ssize_t bytes_read = m_rdma_manager->recv_buffer().read_block(
+                    buf, nbytes, srcAddr, addrlen);
+                
+                if (bytes_read > 0) {
+                    // 成功从RDMA缓冲区读取，补充新的接收WR
+                    if (m_rdma_manager->recv_buffer().available_blocks() > 0) {
+                        m_rdma_manager->post_recv(1);
+                    }
+                    return bytes_read;
+                }
+                if (bytes_read < 0) {
+                    errno = EMSGSIZE;
+                    return -1;
+                }
+            }
+        }
+        
+        // 如果是非阻塞模式，RDMA没有数据就立即返回
+        if (nonblocking) {
+            errno = EAGAIN;
+            return -1;
+        }
+        
+        // ==================== 阶段2：轮询内核socket ====================
+        // 使用非阻塞方式检查内核socket
         char temp_buf[65536];
         sockaddr_storage temp_addr;
         socklen_t temp_addrlen = sizeof(temp_addr);
@@ -3920,28 +3893,35 @@ ssize_t Socket_tb_udp::recvfrom(void *buf, size_t nbytes, int flags,
                                      (sockaddr*)&temp_addr, &temp_addrlen);
         
         if (recv_len > 0) {
-            // 处理UDP元数据
-			sockaddr_in& src_addr_in = *reinterpret_cast<sockaddr_in*>(&temp_addr);
-    		handle_udp_metadata(temp_buf, recv_len, src_addr_in, temp_addrlen);
+            // 处理UDP元数据（可能是RDMA连接建立请求等）
+            sockaddr_in& src_addr_in = *reinterpret_cast<sockaddr_in*>(&temp_addr);
+            handle_udp_metadata(temp_buf, recv_len, src_addr_in, temp_addrlen);
             
-            // 恢复socket标志
-            orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
-            continue;
-        } else if (recv_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            // 真正的错误
-            orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
-            return -1;
+            // 重要：处理完内核数据后，立即回到阶段1检查RDMA缓冲区
+            // （因为handle_udp_metadata可能触发了RDMA传输）
+            continue;  // 跳过等待，直接进入下一次循环
+        } else if (recv_len < 0) {
+            // 检查错误类型
+            int recv_errno = errno;
+            
+            if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) {
+                // 没有数据，正常情况，继续等待
+                std::cout << "[POLL_DEBUG] 内核socket无数据，等待后继续轮询" << std::endl;
+            } else {
+                // 真正的错误，返回
+                std::cerr << "[POLL_ERROR] 内核recvfrom错误: " 
+                          << strerror(recv_errno) << std::endl;
+                return -1;
+            }
         }
         
-        // 等待一小段时间再检查
-        usleep(CHECK_INTERVAL_US);
-        total_wait_us += CHECK_INTERVAL_US;
+        // ==================== 阶段3：短暂等待后继续轮询 ====================
+        // 只有在两个缓冲区都没有数据时才等待
+        usleep(1000);  // 等待1ms
     }
     
-    // 恢复socket标志
-    orig_os_api.fcntl(m_fd, F_SETFL, original_flags);
-    
     // 超时
+    std::cout << "[POLL_TIMEOUT] 轮询超时，未从RDMA缓冲区读取到数据" << std::endl;
     errno = EAGAIN;
     return -1;
 }
