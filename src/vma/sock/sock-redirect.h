@@ -215,7 +215,9 @@ public:
         return 0;
     }
     virtual    int listen(int backlog){
-        if(backlog)
+        if(backlog){
+            
+        }
         return 0;
     }
     virtual    int accept(){
@@ -435,10 +437,6 @@ public:
     // 带缓冲的收发
     ssize_t rx(void *buf, size_t nbytes, int flags = 0);
     ssize_t tx(__const void *__buf, size_t __nbytes, int __flags);
-    
-    // TCP特有选项设置
-    virtual int setKeepAlive(bool enable, int idle = 60, int interval = 10, int count = 5) = 0;
-    virtual int setNoDelay(bool enable) = 0;  // 禁用Nagle算法
 
     // 判断是否已绑定地址
     bool isBound() const { return !m_bind_ip.empty() && m_bind_port != 0; }
@@ -522,23 +520,10 @@ public:
     int handle_socket_options(int optname, void *optval, socklen_t *optlen);
 
 
-
     // 连接模式下的收发（使用connect设置默认地址后）
     virtual ssize_t send(const void *buf, size_t nbytes, int flags = 0) = 0;
     virtual ssize_t recv(void *buf, size_t nbytes, int flags = 0) = 0;
     
-    // 广播和多播支持
-    virtual int setBroadcast(bool enable) = 0;
-    virtual int joinMulticastGroup(const char* multicastAddr, const char* localAddr = nullptr) = 0;
-    virtual int leaveMulticastGroup(const char* multicastAddr) = 0;
-    
-    // UDP特有选项
-    virtual int setReuseAddr(bool enable) = 0;
-    virtual int setMulticastTTL(int ttl) = 0;
-    virtual int setMulticastLoop(bool enable) = 0;
-    
-    // 接收超时设置
-    virtual int setRecvTimeout(int seconds, int microseconds = 0) = 0;
 
     // RDMA管理器 - 每个socket管理自己的RDMA资源
     UDRdmaManager* m_rdma_manager;
