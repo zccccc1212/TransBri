@@ -241,9 +241,9 @@ public:
         return 0;
     }
     virtual    ssize_t recv(void *buf, size_t nbytes, int flags = 0){
-        if(__buf){
-            if(__nbytes){
-                if(__flags){
+        if(buf){
+            if(nbytes){
+                if(flags){
                     
                 }
             }
@@ -261,8 +261,8 @@ public:
         return 0;
     }
     virtual    ssize_t read(void *buf, size_t nbytes){
-        if(__buf){
-            if(__nbytes){
+        if(buf){
+            if(nbytes){
                 
             }
         }
@@ -275,10 +275,13 @@ public:
         if(__buf){
             if(__nbytes){
                 if(__flags){
-                    if(__to || __tolen)
+                    if(__to || __tolen){
+                        
+                    }
                 }
             }
         }
+
         return 0;
     }
     //note !! sendto sendmsg类似的中，都默认了bind的操作，如果这个套接字没有和某个ip地址和端口绑定的话，此时会默认绑定
@@ -381,6 +384,10 @@ public:
     
     // 设置非阻塞模式
     virtual int setNonBlocking(bool nonblocking){
+        if(nonblocking)
+        {
+            
+        }
         return 0;
     }
 
