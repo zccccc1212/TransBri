@@ -272,7 +272,7 @@ public:
     }
 
         // UDP数据收发
-    ssize_t sendto(__const void *__buf, size_t __nbytes, int __flags,
+    virtual ssize_t sendto(__const void *__buf, size_t __nbytes, int __flags,
 	       const struct sockaddr *__to, socklen_t __tolen){
         if(__buf){
             if(__nbytes){
@@ -288,7 +288,7 @@ public:
     }
     //note !! sendto sendmsg类似的中，都默认了bind的操作，如果这个套接字没有和某个ip地址和端口绑定的话，此时会默认绑定
     
-    ssize_t recvfrom(void *buf, size_t nbytes, int flags,
+    virtual ssize_t recvfrom(void *buf, size_t nbytes, int flags,
                      sockaddr *srcAddr, socklen_t *addrlen){
         if(buf){
             if(nbytes){
@@ -302,7 +302,7 @@ public:
         return 0;
     }
 
-    ssize_t sendmsg(const struct msghdr *msg, int flags){
+    virtual ssize_t sendmsg(const struct msghdr *msg, int flags){
         if(msg){
             if(flags){
 
@@ -311,7 +311,7 @@ public:
         return 0;
     }
     
-    ssize_t recvmsg(struct msghdr *__msg, int __flags){
+    virtual ssize_t recvmsg(struct msghdr *__msg, int __flags){
         if(__msg){
             if(__flags){
 
