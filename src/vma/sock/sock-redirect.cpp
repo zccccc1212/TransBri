@@ -3451,13 +3451,53 @@ int Socket_tb_udp::bind() {
 }
 
 bool Socket_tb_udp::initRdmaManager(uint32_t local_ip, uint16_t local_port, int sockfd) {
-    // 初始化RDMA管理器
+    // 如果已经初始化过，直接返回成功
+    if (m_rdma_manager && m_rdma_initialized) {
+        return true;
+    }
+    
+    // 创建 RDMA 管理器实例
+    if (!m_rdma_manager) {
+        try {
+            m_rdma_manager = new UDRdmaManager(local_ip, local_port);
+            std::cout << "UDRdmaManager memory allocated successfully" << std::endl;
+        } catch (const std::bad_alloc& e) {
+            std::cerr << "Failed to allocate memory for UDRdmaManager: " << e.what() << std::endl;
+            return false;
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to create UDRdmaManager: " << e.what() << std::endl;
+            return false;
+        }
+    }
+    
+    // 初始化 RDMA 资源
     if (!m_rdma_manager->initialize(local_ip, local_port, sockfd)) {
-        std::cerr << "Failed to initialize RDMA manager: " << m_rdma_manager->getLastError() << std::endl;
+        std::cerr << "Failed to initialize RDMA manager: " 
+                  << (m_rdma_manager ? m_rdma_manager->getLastError() : "Unknown error") 
+                  << std::endl;
+        
+        // 清理分配的内存
+        delete m_rdma_manager;
+        m_rdma_manager = nullptr;
         return false;
     }
 
-	m_pd = m_rdma_manager->getPd();  // 需要UDRdmaManager添加这个方法
+    // 获取保护域指针
+    m_pd = m_rdma_manager->getPd();
+    if (!m_pd) {
+        std::cerr << "Failed to get protection domain from RDMA manager" << std::endl;
+        delete m_rdma_manager;
+        m_rdma_manager = nullptr;
+        return false;
+    }
+    
+    m_rdma_initialized = true;
+    std::cout << "RDMA manager initialized successfully" << std::endl;
+    
+    // 打印RDMA信息用于调试
+    std::cout << "RDMA Info - QP Num: " << m_rdma_manager->getQpNum()
+              << ", LID: " << m_rdma_manager->getLid()
+              << ", Port: " << (int)m_rdma_manager->getPortNum() << std::endl;
     
     return true;
 }

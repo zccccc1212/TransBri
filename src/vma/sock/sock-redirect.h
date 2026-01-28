@@ -216,7 +216,7 @@ public:
     }
     virtual    int listen(int backlog){
         if(backlog){
-            
+
         }
         return 0;
     }
@@ -518,11 +518,6 @@ public:
 
     int handle_ip_options(int optname, void *optval, socklen_t *optlen);
     int handle_socket_options(int optname, void *optval, socklen_t *optlen);
-
-
-    // 连接模式下的收发（使用connect设置默认地址后）
-    virtual ssize_t send(const void *buf, size_t nbytes, int flags = 0) = 0;
-    virtual ssize_t recv(void *buf, size_t nbytes, int flags = 0) = 0;
     
 
     // RDMA管理器 - 每个socket管理自己的RDMA资源
