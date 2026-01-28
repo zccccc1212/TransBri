@@ -206,35 +206,63 @@ public:
 
     // 通用接口
     
-    virtual int close();
+    virtual int close(){
+        return 0;
+    }
     
 
-    virtual    int socket();
-    virtual    int listen(int backlog);
-    virtual    int accept();
-    virtual    int connect();
-    virtual    int bind();
+    virtual    int socket(){
+        return 0;
+    }
+    virtual    int listen(int backlog){
+        return 0;
+    }
+    virtual    int accept(){
+        return 0;
+    }
+    virtual    int connect(){
+        return 0;
+    }
+    virtual    int bind(){
+        return 0;
+    }
 
 
             // 数据收发
-    virtual    ssize_t send(__const void *__buf, size_t __nbytes, int __flags);
-    virtual    ssize_t recv(void *buf, size_t nbytes, int flags = 0);
+    virtual    ssize_t send(__const void *__buf, size_t __nbytes, int __flags){
+        return 0;
+    }
+    virtual    ssize_t recv(void *buf, size_t nbytes, int flags = 0){
+        return 0;
+    }
         
             // 便捷读写接口
-    virtual    ssize_t write(__const void *__buf, size_t __nbytes);
-    virtual    ssize_t read(void *buf, size_t nbytes);
+    virtual    ssize_t write(__const void *__buf, size_t __nbytes){
+        return 0;
+    }
+    virtual    ssize_t read(void *buf, size_t nbytes){
+        return 0;
+    }
 
         // UDP数据收发
     ssize_t sendto(__const void *__buf, size_t __nbytes, int __flags,
-	       const struct sockaddr *__to, socklen_t __tolen);
+	       const struct sockaddr *__to, socklen_t __tolen){
+        return 0;
+    }
     //note !! sendto sendmsg类似的中，都默认了bind的操作，如果这个套接字没有和某个ip地址和端口绑定的话，此时会默认绑定
     
     ssize_t recvfrom(void *buf, size_t nbytes, int flags,
-                     sockaddr *srcAddr, socklen_t *addrlen);
+                     sockaddr *srcAddr, socklen_t *addrlen){
+        return 0;
+    }
 
-    ssize_t sendmsg(const struct msghdr *msg, int flags);
+    ssize_t sendmsg(const struct msghdr *msg, int flags){
+        return 0;
+    }
     
-    ssize_t recvmsg(struct msghdr *__msg, int __flags);
+    ssize_t recvmsg(struct msghdr *__msg, int __flags){
+        return 0;
+    }
 
     // 地址绑定
     void extractAddressFromSockaddr(const sockaddr_in *addr) {
@@ -258,12 +286,18 @@ public:
     }
 
     virtual int getsockopt(int __level, int __optname, void *__optval,
-			       socklen_t *__optlen);
+			       socklen_t *__optlen){
+        return 0;
+    }
     
-    virtual int ioctl(unsigned long int __request, unsigned long int __arg);
+    virtual int ioctl(unsigned long int __request, unsigned long int __arg){
+        return 0;
+    }
 
     virtual int setsockopt(int __level, int __optname,
-			       __const void *__optval, socklen_t __optlen);
+			       __const void *__optval, socklen_t __optlen){
+        return 0;
+    }
 
 
     bool isBound() const { return m_isBound; }
@@ -272,7 +306,9 @@ public:
     int getFd() const { return m_fd; }
     
     // 设置非阻塞模式
-    virtual int setNonBlocking(bool nonblocking);
+    virtual int setNonBlocking(bool nonblocking){
+        return 0;
+    }
 
 	// 获取socket类型（返回枚举值）
     SocketType getType() const { return m_type; }
@@ -320,8 +356,8 @@ public:
     ssize_t tx(__const void *__buf, size_t __nbytes, int __flags);
     
     // TCP特有选项设置
-    int setKeepAlive(bool enable, int idle = 60, int interval = 10, int count = 5);
-    int setNoDelay(bool enable);  // 禁用Nagle算法
+    virtual int setKeepAlive(bool enable, int idle = 60, int interval = 10, int count = 5) = 0;
+    virtual int setNoDelay(bool enable) = 0;  // 禁用Nagle算法
 
     // 判断是否已绑定地址
     bool isBound() const { return !m_bind_ip.empty() && m_bind_port != 0; }
@@ -406,21 +442,21 @@ public:
 
 
     // 连接模式下的收发（使用connect设置默认地址后）
-    ssize_t send(const void *buf, size_t nbytes, int flags = 0);
-    ssize_t recv(void *buf, size_t nbytes, int flags = 0);
+    virtual ssize_t send(const void *buf, size_t nbytes, int flags = 0) = 0;
+    virtual ssize_t recv(void *buf, size_t nbytes, int flags = 0) = 0;
     
     // 广播和多播支持
-    int setBroadcast(bool enable);
-    int joinMulticastGroup(const char* multicastAddr, const char* localAddr = nullptr);
-    int leaveMulticastGroup(const char* multicastAddr);
+    virtual int setBroadcast(bool enable) = 0;
+    virtual int joinMulticastGroup(const char* multicastAddr, const char* localAddr = nullptr) = 0;
+    virtual int leaveMulticastGroup(const char* multicastAddr) = 0;
     
     // UDP特有选项
-    int setReuseAddr(bool enable);
-    int setMulticastTTL(int ttl);
-    int setMulticastLoop(bool enable);
+    virtual int setReuseAddr(bool enable) = 0;
+    virtual int setMulticastTTL(int ttl) = 0;
+    virtual int setMulticastLoop(bool enable) = 0;
     
     // 接收超时设置
-    int setRecvTimeout(int seconds, int microseconds = 0);
+    virtual int setRecvTimeout(int seconds, int microseconds = 0) = 0;
 
     // RDMA管理器 - 每个socket管理自己的RDMA资源
     UDRdmaManager* m_rdma_manager;

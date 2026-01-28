@@ -1640,7 +1640,9 @@ public:
     int pollRecvCq(int timeout_ms = 0);
     
     // 清理资源
-    void cleanup();
+    void cleanup(){
+        return ;
+    }
     
     // 统计信息结构体
     struct CQStats {
@@ -1650,10 +1652,6 @@ public:
         uint64_t recv_errors;
         size_t registered_qps;
     };
-    
-    // 获取和打印统计信息
-    CQStats getStats() const;
-    void printStats() const;
     
 private:
     // 私有构造函数和析构函数
@@ -1817,18 +1815,6 @@ public:
     // ============ 接收缓冲区相关方法 ============
     size_t post_recv(size_t n);
     bool post_single_recv_internal();
-    
-    // ============ 共享CQ管理 ============
-    // 静态方法获取共享CQ
-    static ibv_cq* getSharedSendCq();
-    static ibv_cq* getSharedRecvCq();
-    
-    // 静态方法启动/停止轮询线程
-    static bool startPollingThreads();
-    static void stopPollingThreads();
-    
-    // 静态方法获取统计信息
-    static void printCqStats();
     
     // ============ 错误信息 ============
     const char* getLastError() const { return m_errorMsg; }
