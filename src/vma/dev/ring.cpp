@@ -904,6 +904,7 @@ void SoRconn_collection::clear(){
 }
 
 
+
 //CQManager udp impl
 // 构造函数
 CQManager::CQManager() 
@@ -922,6 +923,8 @@ CQManager::~CQManager() {
     cleanup();
     std::cout << "CQManager destroyed" << std::endl;
 }
+
+
 
 // 创建共享的CQ
 bool CQManager::createSharedCQs(ibv_context* context, 

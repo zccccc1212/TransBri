@@ -1614,7 +1614,11 @@ private:
 class CQManager {
 public:
     // 获取单例实例
-    static CQManager& getInstance();
+    static CQManager& getInstance() {
+        // C++11 保证局部静态变量线程安全
+        static CQManager instance;
+        return instance;
+    }
     
     // 禁止拷贝和赋值
     CQManager(const CQManager&) = delete;
