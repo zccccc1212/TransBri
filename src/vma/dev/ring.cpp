@@ -1197,9 +1197,182 @@ void CQManager::stopPollingThreads() {
 }
 
 
-//UD qp
-// 单例实例
+RdmaGlobalDeviceManager::RdmaGlobalDeviceManager() {
+    // 构造函数
+}
 
+RdmaGlobalDeviceManager::~RdmaGlobalDeviceManager() {
+    cleanup();
+}
+
+RdmaGlobalDeviceManager& RdmaGlobalDeviceManager::getInstance() {
+    static RdmaGlobalDeviceManager instance;
+    return instance;
+}
+
+bool RdmaGlobalDeviceManager::initializeGlobalDevice() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    if (m_initialized) {
+        std::cout << "Global RDMA device already initialized" << std::endl;
+        return true;
+    }
+    
+    std::cout << "Initializing global RDMA device..." << std::endl;
+    
+    // 步骤1: 发现并打开设备
+    if (!discoverAndOpenDevice()) {
+        return false;
+    }
+    
+    // 步骤2: 查询设备和端口信息
+    if (!queryDeviceAndPort()) {
+        ibv_close_device(m_context);
+        m_context = nullptr;
+        return false;
+    }
+    
+    // 步骤3: 创建全局保护域
+    if (!createGlobalProtectionDomain()) {
+        ibv_close_device(m_context);
+        m_context = nullptr;
+        return false;
+    }
+    
+    m_initialized = true;
+    std::cout << "Global RDMA device initialized successfully!" << std::endl;
+    
+    // 打印设备信息
+    std::cout << "Device capabilities:" << std::endl;
+    std::cout << "  max_qp_wr: " << m_device_attr.max_qp_wr << std::endl;
+    std::cout << "  max_sge: " << m_device_attr.max_sge << std::endl;
+    std::cout << "  max_qp: " << m_device_attr.max_qp << std::endl;
+    std::cout << "  max_cqe: " << m_device_attr.max_cqe << std::endl;
+    
+    return true;
+}
+
+bool RdmaGlobalDeviceManager::discoverAndOpenDevice() {
+    int num_devices = 0;
+    ibv_device** dev_list = ibv_get_device_list(&num_devices);
+    
+    if (!dev_list) {
+        std::cerr << "Failed to get IB devices list" << std::endl;
+        return false;
+    }
+    
+    if (num_devices == 0) {
+        ibv_free_device_list(dev_list);
+        std::cerr << "No RDMA devices found" << std::endl;
+        return false;
+    }
+    
+    std::cout << "Found " << num_devices << " RDMA device(s)" << std::endl;
+    
+    // 选择第一个设备
+    ibv_device* selected_device = dev_list[0];
+    const char* dev_name = ibv_get_device_name(selected_device);
+    std::cout << "Selected device: " << dev_name << std::endl;
+    
+    // 打开设备
+    m_context = ibv_open_device(selected_device);
+    ibv_free_device_list(dev_list);
+    
+    if (!m_context) {
+        std::cerr << "Failed to open RDMA device" << std::endl;
+        return false;
+    }
+    
+    std::cout << "Successfully opened RDMA device" << std::endl;
+    return true;
+}
+
+bool RdmaGlobalDeviceManager::queryDeviceAndPort() {
+    // 查询设备属性
+    if (ibv_query_device(m_context, &m_device_attr)) {
+        std::cerr << "Failed to query device attributes" << std::endl;
+        return false;
+    }
+    
+    // 尝试查询端口（先尝试端口1，如果失败则尝试端口2）
+    ibv_port_attr port_attr;
+    m_port_num = 1;
+    
+    if (ibv_query_port(m_context, m_port_num, &port_attr)) {
+        m_port_num = 2;
+        if (ibv_query_port(m_context, m_port_num, &port_attr)) {
+            std::cerr << "Failed to query port attributes" << std::endl;
+            return false;
+        }
+    }
+    
+    m_lid = port_attr.lid;
+    
+    // 查询GID（RoCE）
+    union ibv_gid gid;
+    if (ibv_query_gid(m_context, m_port_num, 0, &gid) == 0) {
+        memcpy(m_gid, &gid, 16);
+        m_gid_initialized = true;
+        
+        std::cout << "GID (RoCE): ";
+        for (int i = 0; i < 16; i++) {
+            printf("%02x", m_gid[i]);
+            if (i < 15) printf(":");
+        }
+        printf("\n");
+    }
+    
+    std::cout << "Using port " << static_cast<int>(m_port_num) 
+              << ", LID: 0x" << std::hex << m_lid << std::dec << std::endl;
+    
+    return true;
+}
+
+bool RdmaGlobalDeviceManager::createGlobalProtectionDomain() {
+    m_pd = ibv_alloc_pd(m_context);
+    if (!m_pd) {
+        std::cerr << "Failed to allocate global protection domain" << std::endl;
+        return false;
+    }
+    
+    std::cout << "Created global protection domain" << std::endl;
+    return true;
+}
+
+bool RdmaGlobalDeviceManager::getGid(uint8_t gid[16]) const {
+    if (!m_gid_initialized) {
+        return false;
+    }
+    memcpy(gid, m_gid, 16);
+    return true;
+}
+
+void RdmaGlobalDeviceManager::cleanup() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    if (!m_initialized) return;
+    
+    std::cout << "Cleaning up global RDMA resources..." << std::endl;
+    
+    // 销毁全局PD
+    if (m_pd) {
+        ibv_dealloc_pd(m_pd);
+        m_pd = nullptr;
+    }
+    
+    // 关闭设备
+    if (m_context) {
+        ibv_close_device(m_context);
+        m_context = nullptr;
+    }
+    
+    m_initialized = false;
+    std::cout << "Global RDMA resources cleaned up" << std::endl;
+}
+
+
+
+//UD qp manager
 UDRdmaManager::UDRdmaManager(uint32_t local_ip, uint16_t local_port)
     : local_ip_(local_ip), local_port_(local_port) {
     // 构造函数实现
@@ -1226,22 +1399,24 @@ bool UDRdmaManager::initialize(uint32_t local_ip, uint16_t local_port,int sockfd
     
     std::cout << "Initializing Simple RDMA Manager..." << std::endl;
     
-    // 步骤1: 发现并打开设备
-    if (!discoverAndOpenDevice()) {
+    // 步骤1: 确保全局RDMA设备已初始化
+    auto& global_device = RdmaGlobalDeviceManager::getInstance();
+    if (!global_device.initializeGlobalDevice()) {
+        setLastError("Failed to initialize global RDMA device");
         return false;
     }
     
-    // 步骤2: 创建保护域
-    if (!createProtectionDomain()) {
-        cleanup();
-        return false;
+    // 从全局设备获取资源
+    m_resources.context = global_device.getContext();
+    m_resources.pd = global_device.getProtectionDomain();
+    m_resources.port_num = global_device.getPortNum();
+    m_resources.lid = global_device.getLid();
+
+     // 获取GID
+    if (global_device.getGid(m_gid)) {
+        m_gid_initialized = true;
     }
 
-     // 查询GID（应该在设备发现和打开后调用）
-    if (!queryGid()) {
-        std::cerr << "Warning: Failed to query GID, continuing without GID" << std::endl;
-        return false;
-    }
     
     // 步骤3: 创建完成队列
     if (!createCompletionQueues()) {
@@ -1308,117 +1483,10 @@ void UDRdmaManager::cleanup() {
         ibv_destroy_qp(m_resources.qp);
         m_resources.qp = nullptr;
     }
-    
-    // 注销内存区域
-    if (m_resources.memory.recv_mr) {
-        ibv_dereg_mr(m_resources.memory.recv_mr);
-        m_resources.memory.recv_mr = nullptr;
-    }
-    
-    if (m_resources.memory.send_mr) {
-        ibv_dereg_mr(m_resources.memory.send_mr);
-        m_resources.memory.send_mr = nullptr;
-    }
-    
-    // 释放缓冲区
-    if (m_resources.memory.recv_buf) {
-        free(m_resources.memory.recv_buf);
-        m_resources.memory.recv_buf = nullptr;
-    }
-    
-    if (m_resources.memory.send_buf) {
-        free(m_resources.memory.send_buf);
-        m_resources.memory.send_buf = nullptr;
-    }
-    
-    // 销毁PD
-    if (m_resources.pd) {
-        ibv_dealloc_pd(m_resources.pd);
-        m_resources.pd = nullptr;
-    }
-    
-    // 关闭设备上下文
-    if (m_resources.context) {
-        ibv_close_device(m_resources.context);
-        m_resources.context = nullptr;
-    }
+
     
     m_initialized = false;
     std::cout << "RDMA resources cleaned up" << std::endl;
-}
-
-bool UDRdmaManager::discoverAndOpenDevice() {
-    int num_devices = 0;
-    ibv_device** dev_list = ibv_get_device_list(&num_devices);
-    
-    if (!dev_list) {
-        setLastError("Failed to get IB devices list");
-        return false;
-    }
-    
-    if (num_devices == 0) {
-        ibv_free_device_list(dev_list);
-        setLastError("No RDMA devices found");
-        return false;
-    }
-    
-    std::cout << "Found " << num_devices << " RDMA device(s)" << std::endl;
-    
-    // 显示所有设备信息
-    for (int i = 0; i < num_devices; ++i) {
-        const char* dev_name = ibv_get_device_name(dev_list[i]);
-        std::cout << "  Device " << i << ": " << dev_name;
-        
-        // 如果是第一个设备，标记为将选择的设备
-        if (i == 0) {
-            std::cout << " (will use this device)";
-        }
-        std::cout << std::endl;
-    }
-    
-    // 始终选择第一个设备
-    ibv_device* selected_device = dev_list[0];
-    const char* dev_name = ibv_get_device_name(selected_device);
-    m_resources.device.name = dev_name;
-    
-    // 打开设备
-    m_resources.context = ibv_open_device(selected_device);
-    ibv_free_device_list(dev_list);
-    
-    if (!m_resources.context) {
-        setLastError("Failed to open RDMA device");
-        return false;
-    }
-    
-    std::cout << "Opened device: " << m_resources.device.name << std::endl;
-    
-    // 查询端口属性（尝试端口1，如果失败则尝试端口2）
-    m_resources.device.port_num = 1;
-    ibv_port_attr port_attr;
-    if (ibv_query_port(m_resources.context, m_resources.device.port_num, &port_attr)) {
-        m_resources.device.port_num = 2;
-        if (ibv_query_port(m_resources.context, m_resources.device.port_num, &port_attr)) {
-            setLastError("Failed to query port attributes");
-            return false;
-        }
-    }
-    
-    m_resources.device.lid = port_attr.lid;
-    std::cout << "Using port " << (int)m_resources.device.port_num 
-              << ", LID: 0x" << std::hex << m_resources.device.lid << std::dec << std::endl;
-    
-    return true;
-}
-
-bool UDRdmaManager::createProtectionDomain() {
-    m_resources.pd = ibv_alloc_pd(m_resources.context);
-    if (!m_resources.pd) {
-        setLastError("Failed to allocate protection domain");
-        return false;
-    }
-    
-    std::cout << "Created protection domain" << std::endl;
-    return true;
 }
 
 
@@ -1595,7 +1663,7 @@ bool UDRdmaManager::initUdQp() {
     
     qp_attr.qp_state = IBV_QPS_INIT;
     qp_attr.pkey_index = 0;
-    qp_attr.port_num = m_resources.device.port_num;
+    qp_attr.port_num = m_resources.port_num;
     qp_attr.qkey = 0x111111;  // UD QP需要设置qkey，这里使用一个默认值
     
     int flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_QKEY;
@@ -1638,9 +1706,9 @@ void UDRdmaManager::printInfo() const {
     std::cout << "Status: " << (m_initialized ? "Initialized" : "Not initialized") << std::endl;
     
     if (m_initialized) {
-        std::cout << "Device: " << m_resources.device.name << std::endl;
-        std::cout << "Port: " << (int)m_resources.device.port_num << std::endl;
-        std::cout << "LID: 0x" << std::hex << m_resources.device.lid << std::dec << std::endl;
+        std::cout << "Device: " << m_resources.name << std::endl;
+        std::cout << "Port: " << (int)m_resources.port_num << std::endl;
+        std::cout << "LID: 0x" << std::hex << m_resources.lid << std::dec << std::endl;
         std::cout << "QP number: 0x" << std::hex << getQpNum() << std::dec << std::endl;
         std::cout << "QP type: UD (Unreliable Datagram)" << std::endl;
         
@@ -1785,7 +1853,7 @@ bool UDRdmaManager::queryGid() {
     int gid_index = 4;  //
     
     ibv_gid gid;
-    int ret = ibv_query_gid(m_resources.context, m_resources.device.port_num, 
+    int ret = ibv_query_gid(m_resources.context, m_resources.port_num, 
                            gid_index, &gid);
     
     if (ret != 0) {

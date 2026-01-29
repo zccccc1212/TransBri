@@ -1691,39 +1691,65 @@ private:
     mutable std::condition_variable m_cv;
 };
 
-//ud rdma qp
-// 简化的RDMA资源结构
-struct SimpleRdmaResources {
-    ibv_context* context = nullptr;      // 设备上下文
-    ibv_pd* pd = nullptr;                // 保护域
-    ibv_qp* qp = nullptr;                // 队列对（UD类型）
+//全局的单例rdma设备管理
+class RdmaGlobalDeviceManager {
+public:
+    // 获取单例实例
+    static RdmaGlobalDeviceManager& getInstance();
     
-    // 内存区域
-    struct {
-        ibv_mr* send_mr = nullptr;       // 发送内存区域
-        ibv_mr* recv_mr = nullptr;       // 接收内存区域
-        void* send_buf = nullptr;        // 发送缓冲区
-        void* recv_buf = nullptr;        // 接收缓冲区
-        size_t send_size = 0;            // 发送缓冲区大小
-        size_t recv_size = 0;            // 接收缓冲区大小
-    } memory;
+    // 禁止拷贝
+    RdmaGlobalDeviceManager(const RdmaGlobalDeviceManager&) = delete;
+    RdmaGlobalDeviceManager& operator=(const RdmaGlobalDeviceManager&) = delete;
     
-    // 设备信息
-    struct {
-        std::string name;
-        uint8_t port_num = 1;
-        uint16_t lid = 0;
-    } device;
+    // 初始化全局RDMA设备（只调用一次）
+    bool initializeGlobalDevice();
     
-    // UD特定参数
-    uint32_t qkey = 0x111111;
+    // 获取全局资源
+    ibv_context* getContext() const { return m_context; }
+    ibv_pd* getProtectionDomain() const { return m_pd; }
+    uint8_t getPortNum() const { return m_port_num; }
+    uint16_t getLid() const { return m_lid; }
     
-    // 共享CQ引用
-    ibv_cq* shared_send_cq = nullptr;
-    ibv_cq* shared_recv_cq = nullptr;
+    // 查询设备能力
+    const ibv_device_attr& getDeviceAttributes() const { return m_device_attr; }
+    
+    // 获取GID（用于RoCE）
+    bool getGid(uint8_t gid[16]) const;
+    
+    // 清理资源（程序退出时调用）
+    void cleanup();
+    
+    // 状态检查
+    bool isInitialized() const { return m_initialized; }
+    
+private:
+    RdmaGlobalDeviceManager();  // 私有构造函数
+    ~RdmaGlobalDeviceManager();
+    
+    // 内部初始化方法
+    bool discoverAndOpenDevice();
+    bool queryDeviceAndPort();
+    bool createGlobalProtectionDomain();
+    
+private:
+    // 全局RDMA资源
+    ibv_context* m_context = nullptr;
+    ibv_pd* m_pd = nullptr;
+    uint8_t m_port_num = 1;
+    uint16_t m_lid = 0;
+    ibv_device_attr m_device_attr = {};
+    
+    // GID缓存（RoCE）
+    uint8_t m_gid[16];
+    bool m_gid_initialized = false;
+    
+    // 状态
+    std::atomic<bool> m_initialized{false};
+    
+    // 线程安全
+    mutable std::mutex m_mutex;
+    
 };
-
-
 
 // 简化的RDMA管理器 - 单例模式，只管理一个UD QP
 
@@ -1778,8 +1804,8 @@ public:
     
     // 获取QP信息
     uint32_t getQpNum() const { return m_resources.qp ? m_resources.qp->qp_num : 0; }
-    uint16_t getLid() const { return m_resources.device.lid; }
-    uint8_t getPortNum() const { return m_resources.device.port_num; }
+    uint16_t getLid() const { return m_resources.lid; }
+    uint8_t getPortNum() const { return m_resources.port_num; }
     uint32_t getQkey() const { return m_resources.qkey; }
     
     // ============ 缓冲区信息 ============
@@ -1840,12 +1866,25 @@ public:
 
     
 private:
+
+
+ // 不再需要管理设备和PD，只管理QP特定的资源
+    struct UDRdmaResources {
+        ibv_qp* qp = nullptr;                // 队列对（UD类型）
+        std::string name;
+        uint8_t port_num = 1;
+        uint16_t lid = 0;
+        bool gid_initialized = false;
+        uint8_t gid[16] = {0};
+         ibv_context* context = nullptr;      // 指向全局设备上下文的指针（只读，不销毁）
+        ibv_pd* pd = nullptr;      
+    }
+
     // WR ID生成器（静态原子变量，全局递增）
     static std::atomic<uint64_t> wr_id_counter_;
 
     // ============ 内部初始化方法 ============
-    bool discoverAndOpenDevice();
-    bool createProtectionDomain();
+
     bool createCompletionQueues();  // 现在使用共享CQ
     bool createUdQueuePair(uint32_t max_send_wr, uint32_t max_recv_wr,
                           uint32_t max_send_sge, uint32_t max_recv_sge,int socket_fd);
@@ -1858,7 +1897,7 @@ private:
 
     
     // ============ 成员变量 ============
-    SimpleRdmaResources m_resources;
+    UDRdmaResources  m_resources;
     bool m_initialized = false;
     char m_errorMsg[256] = {0};
     std::mutex m_mutex;
@@ -1875,8 +1914,6 @@ private:
     ibv_mr* send_mr_ = nullptr;
     ibv_mr* recv_mr_ = nullptr;
     
-    // 已创建的地址句柄
-    std::vector<ibv_ah*> m_created_ahs;
     
     // 静态变量，跟踪实例数量
     static std::atomic<int> instance_count_;

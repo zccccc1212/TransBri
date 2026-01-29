@@ -1060,39 +1060,6 @@ int bind(int __fd, const struct sockaddr *__addr, socklen_t __addrlen)
 	
 	return ret;
 	//
-
-
-
-
-	char buf[256];
-	NOT_IN_USE(buf); /* to suppress warning in case VMA_MAX_DEFINED_LOG_LEVEL */
-	srdr_logdbg_entry("fd=%d, %s", __fd, sprintf_sockaddr(buf, 256, __addr, __addrlen));
-
-	ret = 0;
-	socket_fd_api* p_socket_object = NULL;
-	p_socket_object = fd_collection_get_sockfd(__fd);
-	if (p_socket_object) {
-		ret = p_socket_object->bind(__addr, __addrlen);
-		if (p_socket_object->isPassthrough()) {
-			handle_close(__fd, false, true);
-			if (ret) {
-				ret = orig_os_api.bind(__fd, __addr, __addrlen);
-			}
-		}
-	}
-	else {
-		ret = orig_os_api.bind(__fd, __addr, __addrlen);
-	}
-
-	if (ret >= 0) {
-		/* Restore errno on function entry in case success */
-		errno = errno_tmp;
-		srdr_logdbg_exit("returned with %d", ret);
-	} else {
-		srdr_logdbg_exit("failed (errno=%d %m)", errno);
-	}
-
-	return ret;
 }
 
 /* Open a connection on socket FD to peer at ADDR (which LEN bytes long).
@@ -3559,6 +3526,7 @@ ssize_t Socket_tb_udp::sendto(__const void *__buf, size_t __nbytes, int __flags,
     }
 	// 应该是先调用内核的sendto，让内核绑定到一个端口，然后再出来了才知道自己的ip地址和端口
 	
+
 
 	// 确保RDMA管理器已初始化
     if (!m_rdma_manager) {
