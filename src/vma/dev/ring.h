@@ -1878,7 +1878,11 @@ private:
         uint8_t gid[16] = {0};
          ibv_context* context = nullptr;      // 指向全局设备上下文的指针（只读，不销毁）
         ibv_pd* pd = nullptr;      
-    }
+
+        // UD特定参数
+        uint32_t qkey = 0x111111;
+    
+    };
 
     // WR ID生成器（静态原子变量，全局递增）
     static std::atomic<uint64_t> wr_id_counter_;

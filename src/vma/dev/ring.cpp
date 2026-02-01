@@ -1711,14 +1711,6 @@ void UDRdmaManager::printInfo() const {
         std::cout << "LID: 0x" << std::hex << m_resources.lid << std::dec << std::endl;
         std::cout << "QP number: 0x" << std::hex << getQpNum() << std::dec << std::endl;
         std::cout << "QP type: UD (Unreliable Datagram)" << std::endl;
-        
-        if (m_resources.memory.send_buf) {
-            std::cout << "Send buffer: " << m_resources.memory.send_size << " bytes" << std::endl;
-        }
-        
-        if (m_resources.memory.recv_buf) {
-            std::cout << "Receive buffer: " << m_resources.memory.recv_size << " bytes" << std::endl;
-        }
     }
     std::cout << "================================\n" << std::endl;
 }

@@ -1043,7 +1043,6 @@ extern "C"
 EXPORT_SYMBOL
 int bind(int __fd, const struct sockaddr *__addr, socklen_t __addrlen)
 {
-	int errno_tmp = errno;
 
 	BULLSEYE_EXCLUDE_BLOCK_START
 	if (!orig_os_api.bind) get_orig_funcs();
@@ -3874,7 +3873,7 @@ ssize_t Socket_tb_udp::recvfrom(void *buf, size_t nbytes, int flags,
             
             if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) {
                 // 没有数据，正常情况，继续等待
-                std::cout << "[POLL_DEBUG] 内核socket无数据，等待后继续轮询" << std::endl;
+                //std::cout << "[POLL_DEBUG] 内核socket无数据，等待后继续轮询" << std::endl;
             } else {
                 // 真正的错误，返回
                 std::cerr << "[POLL_ERROR] 内核recvfrom错误: " 
