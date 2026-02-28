@@ -3413,7 +3413,7 @@ int Socket_tb_udp::bind() {
     inet_ntop(AF_INET, &local_addr.sin_addr, ip_str, sizeof(ip_str));
     uint16_t port = ntohs(local_addr.sin_port);
     
-    std::cout << "UDP socket bound to " << ip_str << ":" << port << std::endl;
+    std::cout << m_fd << " UDP socket bound to " << ip_str << ":" << port << std::endl;
     
     // 初始化 RDMA 管理器
     if (!initRdmaManager(local_addr.sin_addr.s_addr, local_addr.sin_port, m_fd)) {
@@ -3709,6 +3709,7 @@ ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
             RDMA_Metadata local_meta = get_local_metadata();
             char req_buf[RDMA_Metadata::serialized_size()];
             local_meta.serialize(reinterpret_cast<uint8_t*>(req_buf));
+			std::cout << "sendmsg: sending metadata request to " << target_ip << ":" << target_port << std::endl;
             ssize_t sent = orig_os_api.sendto(m_fd, req_buf, sizeof(req_buf), 0,
                                               reinterpret_cast<const sockaddr*>(to_addr),
                                               sizeof(struct sockaddr_in));
@@ -4310,140 +4311,110 @@ int Socket_tb_udp::handle_ip_options(int optname, void *optval, socklen_t *optle
 
 
 
-
-
-
-
+// RDMA_Metadata 的序列化大小（实际应从定义获取）
+constexpr size_t META_SIZE = RDMA_Metadata::serialized_size();
 
 GlobalControlThread& GlobalControlThread::instance() {
     static GlobalControlThread inst;
+    std::cout << "[DEBUG] GlobalControlThread::instance() called" << std::endl;
     return inst;
 }
 
 GlobalControlThread::GlobalControlThread() {
-    // 创建 epoll 实例（使用 EPOLL_CLOEXEC 防止 fork 后泄漏）
-    epfd_ = orig_os_api.epoll_create1(EPOLL_CLOEXEC);
-    if (epfd_ == -1) {
-        std::cerr << "GlobalControlThread: epoll_create1 failed: " << strerror(errno) << std::endl;
-        epfd_ = -1;
-    }
-
-    // 创建唤醒管道，并设置为执行时关闭标志
-    if (pipe2(wake_fds_, O_CLOEXEC) == -1) {
-        std::cerr << "GlobalControlThread: pipe2 failed: " << strerror(errno) << std::endl;
-        wake_fds_[0] = wake_fds_[1] = -1;
-    } else {
-        // 将管道读端加入 epoll 监听，用于唤醒 epoll_wait
-        struct epoll_event ev;
-        ev.events = EPOLLIN;
-        ev.data.fd = wake_fds_[0];
-        if (orig_os_api.epoll_ctl(epfd_, EPOLL_CTL_ADD, wake_fds_[0], &ev) == -1) {
-            std::cerr << "GlobalControlThread: epoll_ctl add wake fd failed: " << strerror(errno) << std::endl;
-        }
-    }
+    std::cout << "[DEBUG] GlobalControlThread constructed" << std::endl;
 }
 
 GlobalControlThread::~GlobalControlThread() {
+    std::cout << "[DEBUG] GlobalControlThread destructing" << std::endl;
     stop();
-    if (epfd_ != -1) close(epfd_);
-    if (wake_fds_[0] != -1) close(wake_fds_[0]);
-    if (wake_fds_[1] != -1) close(wake_fds_[1]);
 }
 
 void GlobalControlThread::start() {
-    if (thread_.joinable()) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (thread_.joinable()) {
+        std::cout << "[DEBUG] start() - thread already running" << std::endl;
+        return;
+    }
+    std::cout << "[DEBUG] start() - launching control thread" << std::endl;
     stop_flag_ = false;
     thread_ = std::thread(&GlobalControlThread::control_loop, this);
 }
 
 void GlobalControlThread::stop() {
+    std::cout << "[DEBUG] stop() called" << std::endl;
     stop_flag_ = true;
-    // 向管道写入数据，唤醒 epoll_wait
-    if (wake_fds_[1] != -1) {
-        char dummy = 0;
-        orig_os_api.write(wake_fds_[1], &dummy, 1);
-    }
     if (thread_.joinable()) {
+        std::cout << "[DEBUG] stop() - joining thread" << std::endl;
         thread_.join();
+        std::cout << "[DEBUG] stop() - thread joined" << std::endl;
     }
 }
 
 void GlobalControlThread::register_socket(Socket_tb_udp* sock, int fd) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    fd_to_socket_[fd] = sock;
-
-    // 将 fd 加入 epoll 监听（水平触发，只关心可读）
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.fd = fd;
-    if (orig_os_api.epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev) == -1) {
-        std::cerr << "register_socket: epoll_ctl ADD failed for fd " << fd
-                  << ": " << strerror(errno) << std::endl;
+    std::cout << "[DEBUG] register_socket: fd=" << fd << " sock=" << sock << std::endl;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        fd_to_socket_[fd] = sock;
     }
-
-    // 唤醒 epoll_wait，使其能及时处理新 fd（有助于快速响应）
-    if (wake_fds_[1] != -1) {
-        char dummy = 0;
-        orig_os_api.write(wake_fds_[1], &dummy, 1);
-    }
-
-    // 如果线程尚未启动，则自动启动
-    if (!thread_.joinable()) {
-        start();
-    }
+    start();  // 尝试启动线程
 }
 
 void GlobalControlThread::unregister_socket(int fd) {
+    std::cout << "[DEBUG] unregister_socket: fd=" << fd << std::endl;
     std::lock_guard<std::mutex> lock(mutex_);
     fd_to_socket_.erase(fd);
-
-    // 从 epoll 中移除 fd
-    if (orig_os_api.epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr) == -1) {
-        // 如果 fd 不存在于 epoll 中，忽略错误（例如重复注销）
-        if (errno != ENOENT) {
-            std::cerr << "unregister_socket: epoll_ctl DEL failed for fd " << fd
-                      << ": " << strerror(errno) << std::endl;
-        }
-    }
-
-    // 唤醒 epoll_wait，以便重新计算（可选）
-    if (wake_fds_[1] != -1) {
-        char dummy = 0;
-        orig_os_api.write(wake_fds_[1], &dummy, 1);
-    }
 }
 
 void GlobalControlThread::control_loop() {
-    const size_t meta_size = RDMA_Metadata::serialized_size();
-    char recv_buf[meta_size];
-
-    const int MAX_EVENTS = 64;
-    struct epoll_event events[MAX_EVENTS];
+    std::cout << "[DEBUG] control_loop started (thread id: " << std::this_thread::get_id() << ")" << std::endl;
+    char recv_buf[META_SIZE];
 
     while (!stop_flag_) {
-        // 阻塞等待事件
-        int nfds = orig_os_api.epoll_wait(epfd_, events, MAX_EVENTS, -1);
-        if (nfds == -1) {
-            if (errno == EINTR) continue;      // 被信号中断，继续
-            std::cerr << "control_loop: epoll_wait error: " << strerror(errno) << std::endl;
-            break;
+        // 获取当前所有 fd 的快照
+        std::vector<int> current_fds;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& [fd, _] : fd_to_socket_) {
+                current_fds.push_back(fd);
+            }
         }
 
-        // 处理所有发生的事件
-        for (int i = 0; i < nfds; ++i) {
-            int fd = events[i].data.fd;
+        // 调试：当有 fd 时打印数量（可注释掉以减少输出）
+        if (!current_fds.empty()) {
+            std::cout << "[DEBUG] control_loop: polling " << current_fds.size() << " fds" << std::endl;
+        }
 
-            // 如果是唤醒管道的读端，则读取数据清空管道，并继续
-            if (fd == wake_fds_[0]) {
-                char dummy;
-                orig_os_api.read(wake_fds_[0], &dummy, 1);
-                // 唤醒后不需要特殊处理，继续循环即可
-                continue;
+        // 遍历所有 fd，非阻塞接收
+        for (int fd : current_fds) {
+            if (stop_flag_) break;
+
+            struct sockaddr_storage src_addr;
+            socklen_t addrlen = sizeof(src_addr);
+            ssize_t len = orig_os_api.recvfrom(fd, recv_buf, META_SIZE, MSG_DONTWAIT,
+                                                (struct sockaddr*)&src_addr, &addrlen);
+            if (len == -1) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // 无数据，继续
+                    continue;
+                } else {
+                    std::cerr << "[ERROR] control_loop: recvfrom error on fd " << fd 
+                              << ": " << strerror(errno) << std::endl;
+                    continue;
+                }
             }
 
-            // 检查是否是有效的事件（这里只注册了 EPOLLIN，所以肯定可读）
-            if (!(events[i].events & EPOLLIN)) {
-                continue;   // 忽略其他事件类型（理论上不会发生）
+            // 收到数据，打印基本信息
+            char ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &((sockaddr_in*)&src_addr)->sin_addr, ip, sizeof(ip));
+            int port = ntohs(((sockaddr_in*)&src_addr)->sin_port);
+            std::cout << "[DEBUG] control_loop: received " << len << " bytes on fd " << fd
+                      << " from " << ip << ":" << port << std::endl;
+
+            // 只处理固定大小的元数据包
+            if (len != (ssize_t)META_SIZE) {
+                std::cout << "[DEBUG] control_loop: length mismatch (expected " << META_SIZE
+                          << "), ignoring" << std::endl;
+                continue;
             }
 
             // 根据 fd 找到对应的 Socket_tb_udp 实例
@@ -4456,31 +4427,22 @@ void GlobalControlThread::control_loop() {
                 }
             }
             if (!sock) {
-                // fd 可能已被注销但事件仍残留？理论上 epoll_ctl DEL 后不会再有事件，
-                // 但以防万一，我们跳过。
+                std::cout << "[DEBUG] control_loop: no socket found for fd " << fd << ", ignoring" << std::endl;
                 continue;
             }
 
-            // 接收数据（只接收固定大小的元数据包）
-            struct sockaddr_storage src_addr;
-            socklen_t addrlen = sizeof(src_addr);
-            ssize_t len = orig_os_api.recvfrom(fd, recv_buf, meta_size, 0,
-                                                (struct sockaddr*)&src_addr, &addrlen);
-            // 如果接收到的长度不是预期的元数据大小，则忽略（可能是普通 UDP 数据）
-            if (len != (ssize_t)meta_size) {
-                continue;
-            }
-
-            // 调用对应 socket 的元数据处理函数
+            // 调用元数据处理函数
+            std::cout << "[DEBUG] control_loop: calling handle_control_message for fd " << fd << std::endl;
             sock->handle_control_message(recv_buf,
                                          *reinterpret_cast<sockaddr_in*>(&src_addr),
                                          addrlen);
         }
+
+        // 短暂休眠，避免 CPU 占用过高
+        usleep(1000);
     }
+    std::cout << "[DEBUG] control_loop exiting" << std::endl;
 }
-
-
-
 
 
 

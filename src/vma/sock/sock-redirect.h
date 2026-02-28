@@ -550,11 +550,11 @@ private:
     ibv_pd* m_pd;  // 保护域指针
 
 };
-
 /**
  * 全局控制线程类（单例）
  * 负责监听所有已注册 UDP socket 上的 RDMA 元数据包，
  * 并分发到对应的 Socket_tb_udp 实例进行处理。
+ * 采用非阻塞轮询方式检查数据到达。
  */
 class GlobalControlThread {
 public:
@@ -578,7 +578,8 @@ public:
     void unregister_socket(int fd);
 
     /**
-     * 启动控制线程（在注册第一个 socket 时自动调用，也可手动提前启动）。
+     * 启动控制线程（通常由 register_socket 自动调用，也可手动提前启动）。
+     * 线程安全，可多次调用，但只会启动一次。
      */
     void start();
 
@@ -597,11 +598,8 @@ private:
     std::thread thread_;                     // 控制线程对象
     std::atomic<bool> stop_flag_{false};     // 停止标志
 
-    std::mutex mutex_;                        // 保护 fd_to_socket_ 映射
+    std::mutex mutex_;                        // 保护 fd_to_socket_ 映射和线程启动
     std::map<int, Socket_tb_udp*> fd_to_socket_;  // fd -> socket 实例
-
-    int epfd_ = -1;                            // epoll 文件描述符
-    int wake_fds_[2] = {-1, -1};                // 唤醒管道（[0]读，[1]写）
 };
 
 
