@@ -490,7 +490,7 @@ public:
 
     bool ensure_rdma_initialized();
 
-    void handle_control_message(const char* data, ssize_t len,
+    void handle_control_message(const char* data, 
                                            const struct sockaddr_in& src_addr,
                                            socklen_t addrlen);
 

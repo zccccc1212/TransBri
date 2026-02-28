@@ -3517,7 +3517,7 @@ bool Socket_tb_udp::ensure_rdma_initialized() {
     return true;
 }
 
-void Socket_tb_udp::handle_control_message(const char* data, ssize_t len,
+void Socket_tb_udp::handle_control_message(const char* data,
                                            const struct sockaddr_in& src_addr,
                                            socklen_t addrlen) {
     RDMA_Metadata meta;
@@ -4329,7 +4329,7 @@ GlobalControlThread::GlobalControlThread() {
     }
 
     // 创建唤醒管道，并设置为执行时关闭标志
-    if (orig_os_api.pipe2(wake_fds_, O_CLOEXEC) == -1) {
+    if (pipe2(wake_fds_, O_CLOEXEC) == -1) {
         std::cerr << "GlobalControlThread: pipe2 failed: " << strerror(errno) << std::endl;
         wake_fds_[0] = wake_fds_[1] = -1;
     } else {
@@ -4472,7 +4472,7 @@ void GlobalControlThread::control_loop() {
             }
 
             // 调用对应 socket 的元数据处理函数
-            sock->handle_control_message(recv_buf, len,
+            sock->handle_control_message(recv_buf,
                                          *reinterpret_cast<sockaddr_in*>(&src_addr),
                                          addrlen);
         }
