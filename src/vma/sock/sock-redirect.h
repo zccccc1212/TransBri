@@ -191,6 +191,7 @@ struct mmsghdr;
 const char* sprintf_fdset(char* buf, int buflen, int __nfds, fd_set *__fds);
 
 
+
 // zc add
 class Socket_transbridge{
 public:
@@ -460,7 +461,6 @@ private:
 };
 
 
-
 class Socket_tb_udp : public Socket_transbridge{
 public:
 
@@ -482,33 +482,37 @@ public:
         return 0;
     }  // 断开伪连接
     
+    RDMA_Metadata get_local_metadata() const；
+
+    bool ensure_rdma_initialized(const struct sockaddr* to);
+
+    void handle_control_message(const char* data, ssize_t len,
+                                           const struct sockaddr_in& src_addr,
+                                           socklen_t addrlen);
+
     // UDP数据收发
-    ssize_t sendto(__const void *__buf, size_t __nbytes, int __flags,
-	       const struct sockaddr *__to, socklen_t __tolen);
     //note !! sendto sendmsg类似的中，都默认了bind的操作，如果这个套接字没有和某个ip地址和端口绑定的话，此时会默认绑定
-    
+
+    ssize_t sendto(const void *__buf, size_t __nbytes, int __flags,
+                              const struct sockaddr *__to, socklen_t __tolen);
+
     ssize_t recvfrom(void *buf, size_t nbytes, int flags,
                      sockaddr *srcAddr, socklen_t *addrlen);
 
     ssize_t sendmsg(const struct msghdr *msg, int flags);
-                     
+
+    ssize_t fallback_to_normal_sendto(const void *buf, size_t nbytes, int flags,
+                                                 const struct sockaddr *to, socklen_t tolen);
+
+
     ssize_t fallback_to_normal_sendmsg(const struct msghdr *msg, int flags, 
                                                   const struct sockaddr_in* to_addr);
-
-    bool establish_rdma_connection(const char* remote_ip, int remote_port,
-                                 const struct sockaddr* to_addr);
-                                    
+                                   
     void updateRdmaLocalAddress(uint32_t new_ip, uint16_t new_port);
-
-    bool send_metadata(int sockfd, const sockaddr* to, socklen_t tolen);
-    bool receive_metadata(int sockfd, sockaddr* from, socklen_t* fromlen, RDMA_Metadata& metadata);
 
     bool post_send_to_peer(const PeerInfo* peer, size_t data_len);
 
-    ssize_t handle_udp_metadata(char* temp_buf, ssize_t recv_len,
-                                sockaddr_in& src_addr, socklen_t src_len);
 
-    ssize_t recvmsg(struct msghdr *__msg, int __flags);
 
     int getsockopt(int __level, int __optname, void *__optval, socklen_t *__optlen);
     
@@ -536,8 +540,64 @@ private:
 
     bool isbound;
 
+    std::mutex cv_mutex_;               // 保护条件变量
+    std::condition_variable cv_;         // 等待对端就绪
+
     ibv_pd* m_pd;  // 保护域指针
 
+};
+
+/**
+ * 全局控制线程类（单例）
+ * 负责监听所有已注册 UDP socket 上的 RDMA 元数据包，
+ * 并分发到对应的 Socket_tb_udp 实例进行处理。
+ */
+class GlobalControlThread {
+public:
+    static GlobalControlThread& instance();
+
+    // 禁止拷贝和赋值
+    GlobalControlThread(const GlobalControlThread&) = delete;
+    GlobalControlThread& operator=(const GlobalControlThread&) = delete;
+
+    /**
+     * 注册一个 socket 到控制线程。
+     * @param sock 指向 Socket_tb_udp 实例的指针
+     * @param fd   socket 文件描述符
+     */
+    void register_socket(Socket_tb_udp* sock, int fd);
+
+    /**
+     * 注销一个 socket。
+     * @param fd socket 文件描述符
+     */
+    void unregister_socket(int fd);
+
+    /**
+     * 启动控制线程（在注册第一个 socket 时自动调用，也可手动提前启动）。
+     */
+    void start();
+
+    /**
+     * 停止控制线程。
+     */
+    void stop();
+
+private:
+    GlobalControlThread();
+    ~GlobalControlThread();
+
+    // 控制线程主函数
+    void control_loop();
+
+    std::thread thread_;                     // 控制线程对象
+    std::atomic<bool> stop_flag_{false};     // 停止标志
+
+    std::mutex mutex_;                        // 保护 fd_to_socket_ 映射
+    std::map<int, Socket_tb_udp*> fd_to_socket_;  // fd -> socket 实例
+
+    int epfd_ = -1;                            // epoll 文件描述符
+    int wake_fds_[2] = {-1, -1};                // 唤醒管道（[0]读，[1]写）
 };
 
 
@@ -607,6 +667,7 @@ private:
     // 互斥锁，保护对端映射表
     mutable std::mutex mutex_;
 };
+
 
 
 /* *
