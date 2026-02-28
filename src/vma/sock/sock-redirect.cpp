@@ -3484,7 +3484,7 @@ bool Socket_tb_udp::initRdmaManager(uint32_t local_ip, uint16_t local_port, int 
 }
 
 
-bool Socket_tb_udp::ensure_rdma_initialized(const struct sockaddr* to) {
+bool Socket_tb_udp::ensure_rdma_initialized() {
     if (m_rdma_initialized && m_rdma_manager) return true;
 
     std::unique_lock<std::mutex> lock(cv_mutex_);  // 保护初始化
@@ -3569,7 +3569,7 @@ void Socket_tb_udp::handle_control_message(const char* data, ssize_t len,
     cv_.notify_all();
 }
 
-RDMA_Metadata Socket_tb_udp::get_local_metadata() const {
+RDMA_Metadata Socket_tb_udp::get_local_metadata(){
     RDMA_Metadata meta;
     if (m_rdma_manager) {
         meta.qpn = m_rdma_manager->getQpNum();
@@ -3593,7 +3593,7 @@ ssize_t Socket_tb_udp::sendto(const void *__buf, size_t __nbytes, int __flags,
     inet_ntop(AF_INET, &to_addr->sin_addr, ip_str, sizeof(ip_str));
     int port = ntohs(to_addr->sin_port);
 
-    if (!ensure_rdma_initialized(__to)) {
+    if (!ensure_rdma_initialized()) {
         return fallback_to_normal_sendto(__buf, __nbytes, __flags, __to, __tolen);
     }
 
@@ -3689,7 +3689,7 @@ ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
         total_len += msg->msg_iov[i].iov_len;
     if (total_len == 0) return 0;
 
-    if (!ensure_rdma_initialized(reinterpret_cast<const sockaddr*>(to_addr))) {
+    if (!ensure_rdma_initialized()) {
         return fallback_to_normal_sendmsg(msg, flags, to_addr);
     }
 
@@ -4337,7 +4337,7 @@ GlobalControlThread::GlobalControlThread() {
         struct epoll_event ev;
         ev.events = EPOLLIN;
         ev.data.fd = wake_fds_[0];
-        if (epoll_ctl(epfd_, EPOLL_CTL_ADD, wake_fds_[0], &ev) == -1) {
+        if (orig_os_api.epoll_ctl(epfd_, EPOLL_CTL_ADD, wake_fds_[0], &ev) == -1) {
             std::cerr << "GlobalControlThread: epoll_ctl add wake fd failed: " << strerror(errno) << std::endl;
         }
     }

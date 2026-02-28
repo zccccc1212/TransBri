@@ -89,6 +89,8 @@
 #include <condition_variable>
 #include <thread>
 #include <atomic>
+#include <map>
+
 
 #include <vlogger/vlogger.h>
 
@@ -484,9 +486,9 @@ public:
         return 0;
     }  // 断开伪连接
     
-    RDMA_Metadata get_local_metadata const ();
+    RDMA_Metadata get_local_metadata();
 
-    bool ensure_rdma_initialized(const struct sockaddr* to);
+    bool ensure_rdma_initialized();
 
     void handle_control_message(const char* data, ssize_t len,
                                            const struct sockaddr_in& src_addr,
