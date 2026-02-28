@@ -86,7 +86,9 @@
 #include <vma/util/vma_stats.h>
 #include <vma/util/sys_vars.h>
 #include <vma/util/utils.h>
-
+#include <condition_variable>
+#include <thread>
+#include <atomic>
 
 #include <vlogger/vlogger.h>
 
@@ -482,7 +484,7 @@ public:
         return 0;
     }  // 断开伪连接
     
-    RDMA_Metadata get_local_metadata() const；
+    RDMA_Metadata get_local_metadata const ();
 
     bool ensure_rdma_initialized(const struct sockaddr* to);
 
