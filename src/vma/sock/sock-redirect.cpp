@@ -3521,7 +3521,7 @@ bool Socket_tb_udp::ensure_rdma_initialized() {
 void Socket_tb_udp::handle_control_message(const char* data,
                                            const struct sockaddr_in& src_addr,
                                            socklen_t addrlen) {
-    // 1. 反序列化对端元数据
+    // 反序列化对端元数据
     RDMA_Metadata remote_meta;
     try {
         remote_meta.deserialize(reinterpret_cast<const uint8_t*>(data));
@@ -3530,45 +3530,41 @@ void Socket_tb_udp::handle_control_message(const char* data,
         return;
     }
 
-	auto& peer_mgr = GlobalPeerManager::instance();
-
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &src_addr.sin_addr, ip, sizeof(ip));
     int port = ntohs(src_addr.sin_port);
-    std::string peer_key = peer_mgr.make_peer_key(ip, port);
+    std::string peer_key = std::string(ip) + ":" + std::to_string(port);
 
-    bool is_reply = false;
-    {
-        std::unique_lock<std::mutex> lock(cv_mutex_);
-        auto it = waiting_reply_.find(peer_key);
-        if (it != waiting_reply_.end() && it->second) {
-            is_reply = true;
-            waiting_reply_.erase(it);  // 清除等待标记
-        }
-    }
+    std::cout << "handle_control_message: received from " << peer_key
+              << ", type=" << (int)remote_meta.type << std::endl;
 
-    // 2. 确保 RDMA 已初始化（如果需要）
+    // 确保 RDMA 已初始化（以便发送回复）
     if (!ensure_rdma_initialized()) {
-        std::cerr << "handle_control_message: RDMA not initialized" << std::endl;
+        std::cerr << "handle_control_message: RDMA not initialized, ignoring" << std::endl;
         return;
     }
 
-    
+    auto& peer_mgr = GlobalPeerManager::instance();
     ibv_pd* pd = m_rdma_manager->getPd();
 
-    // 3. 更新对端信息（总是更新，包括 AH）
+    // 总是更新对端信息（包括 QPN、GID 等）
     peer_mgr.add_peer(ip, port, remote_meta, pd);
     peer_mgr.get_or_create_ah(ip, port, pd, remote_meta.port_num);
 
-    if (is_reply) {
-        // 这是对之前请求的回复，唤醒等待的发送线程
+    if (remote_meta.type == 1) {
+        // 这是对之前请求的回复：唤醒所有等待的发送线程
+        std::cout << "  -> It's a reply, notifying waiters." << std::endl;
         cv_.notify_all();
-        std::cout << "handle_control_message: received reply from " << peer_key << std::endl;
-        return;  // 不回复
+        return;   // 不发送回复
     }
 
-    // 4. 这是新的请求，发送本地元数据作为回复
+    // 这是新的请求（type == 0），需要发送回复
+    std::cout << "  -> It's a request, sending reply." << std::endl;
+
+    // 构造回复元数据，type 设为 1
     RDMA_Metadata local_meta = get_local_metadata();
+    local_meta.type = 1;   // 标记为回复
+
     char reply[RDMA_Metadata::serialized_size()];
     local_meta.serialize(reinterpret_cast<uint8_t*>(reply));
 
@@ -3577,26 +3573,26 @@ void Socket_tb_udp::handle_control_message(const char* data,
     if (sent != sizeof(reply)) {
         std::cerr << "handle_control_message: failed to send reply to " << peer_key << std::endl;
     } else {
-        std::cout << "handle_control_message: sent reply to " << peer_key << std::endl;
+        std::cout << "handle_control_message: reply sent to " << peer_key << std::endl;
     }
 }
 
 
-RDMA_Metadata Socket_tb_udp::get_local_metadata(){
+RDMA_Metadata Socket_tb_udp::get_local_metadata() const {
     RDMA_Metadata meta;
     if (m_rdma_manager) {
         meta.qpn = m_rdma_manager->getQpNum();
         meta.port_num = m_rdma_manager->getPortNum();
         meta.qkey = m_rdma_manager->getQkey();
-        m_rdma_manager->getGid(meta.gid);   // 假设 UDRdmaManager 已有 getGid 方法
+        m_rdma_manager->getGid(meta.gid);
     }
+    meta.type = 0;   // 默认为请求，发送回复时再修改为1
     return meta;
 }
 
-
 ssize_t Socket_tb_udp::sendto(const void *__buf, size_t __nbytes, int __flags,
                               const struct sockaddr *__to, socklen_t __tolen) {
-    // ========== 1. 参数检查 ==========
+    // 参数检查
     if (!__buf || __nbytes == 0 || !__to || __tolen != sizeof(sockaddr_in)) {
         errno = EINVAL;
         return -1;
@@ -3606,9 +3602,8 @@ ssize_t Socket_tb_udp::sendto(const void *__buf, size_t __nbytes, int __flags,
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &to_addr->sin_addr, ip_str, sizeof(ip_str));
     int port = ntohs(to_addr->sin_port);
-    std::string peer_key = peer_mgr.make_peer_key(ip_str, port);
 
-    // ========== 2. 确保 RDMA 已初始化 ==========
+    // 确保 RDMA 初始化
     if (!ensure_rdma_initialized()) {
         return fallback_to_normal_sendto(__buf, __nbytes, __flags, __to, __tolen);
     }
@@ -3616,9 +3611,8 @@ ssize_t Socket_tb_udp::sendto(const void *__buf, size_t __nbytes, int __flags,
     auto& peer_manager = GlobalPeerManager::instance();
     const PeerInfo* peer = nullptr;
 
-    // ========== 3. 检查对端是否存在，不存在则发起连接 ==========
     {
-        std::unique_lock<std::mutex> lock(cv_mutex_);  // 保护 waiting_reply_ 和条件变量
+        std::unique_lock<std::mutex> lock(cv_mutex_);   // 保护条件变量
 
         peer = peer_manager.get_peer(ip_str, port);
         if (!peer) {
@@ -3627,8 +3621,9 @@ ssize_t Socket_tb_udp::sendto(const void *__buf, size_t __nbytes, int __flags,
                 return -1;
             }
 
-            // 发送元数据请求
+            // 发送元数据请求（type=0）
             RDMA_Metadata local_meta = get_local_metadata();
+            local_meta.type = 0;   // 显式设为请求
             char req_buf[RDMA_Metadata::serialized_size()];
             local_meta.serialize(reinterpret_cast<uint8_t*>(req_buf));
             std::cout << "sendto: sending metadata request to " << ip_str << ":" << port << std::endl;
@@ -3639,22 +3634,18 @@ ssize_t Socket_tb_udp::sendto(const void *__buf, size_t __nbytes, int __flags,
                 return fallback_to_normal_sendto(__buf, __nbytes, __flags, __to, __tolen);
             }
 
-            // 标记正在等待该对端的回复
-            waiting_reply_[peer_key] = true;
-
-            // 等待对端回复（超时5秒）
+            // 等待对端信息出现（由 handle_control_message 在收到回复时更新并 notify）
             bool ready = cv_.wait_for(lock, std::chrono::seconds(5),
                 [&peer_manager, ip_str, port] {
                     return peer_manager.get_peer(ip_str, port) != nullptr;
                 });
 
             if (!ready) {
-                waiting_reply_.erase(peer_key);  // 超时清除标记
                 errno = ETIMEDOUT;
                 return -1;
             }
 
-            // 成功获得回复，此时 waiting_reply_ 已在 handle_control_message 中清除
+            // 重新获取 peer 信息
             peer = peer_manager.get_peer(ip_str, port);
             if (!peer) {
                 return fallback_to_normal_sendto(__buf, __nbytes, __flags, __to, __tolen);
@@ -3662,21 +3653,19 @@ ssize_t Socket_tb_udp::sendto(const void *__buf, size_t __nbytes, int __flags,
         }
     }
 
-    // ========== 4. 数据大小检查 ==========
+    // 数据大小检查
     if (__nbytes > m_rdma_manager->send_buffer().data_capacity()) {
-        std::cerr << "sendto: data too large (" << __nbytes 
-                  << " > " << m_rdma_manager->send_buffer().data_capacity() 
-                  << "), fallback to UDP" << std::endl;
+        std::cerr << "sendto: data too large, fallback to UDP" << std::endl;
         return fallback_to_normal_sendto(__buf, __nbytes, __flags, __to, __tolen);
     }
 
-    // ========== 5. 写入 RDMA 发送缓冲区 ==========
+    // 写入 RDMA 发送缓冲区
     if (!m_rdma_manager->send_buffer().write_block(__buf, __nbytes)) {
         errno = EAGAIN;
         return -1;
     }
 
-    // ========== 6. 执行 RDMA 发送 ==========
+    // 执行 RDMA 发送
     if (!post_send_to_peer(peer, __nbytes)) {
         return fallback_to_normal_sendto(__buf, __nbytes, __flags, __to, __tolen);
     }
@@ -3685,13 +3674,13 @@ ssize_t Socket_tb_udp::sendto(const void *__buf, size_t __nbytes, int __flags,
 }
 
 ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
-    // ========== 1. 参数检查 ==========
+    // 参数检查
     if (!msg || !msg->msg_iov || msg->msg_iovlen == 0) {
         errno = EINVAL;
         return -1;
     }
 
-    // ========== 2. 提取目标地址 ==========
+    // 提取目标地址
     const struct sockaddr_in* to_addr = nullptr;
     std::string target_ip;
     int target_port = 0;
@@ -3717,35 +3706,37 @@ ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
         return -1;
     }
 
-    // ========== 3. 计算总数据长度 ==========
+    // 计算总数据长度
     size_t total_len = 0;
     for (size_t i = 0; i < msg->msg_iovlen; ++i)
         total_len += msg->msg_iov[i].iov_len;
     if (total_len == 0) return 0;
 
-    // ========== 4. 打印目标地址和数据大小 ==========
-    std::cout << "sendmsg: sending to " << target_ip << ":" << target_port 
+    // 打印目标地址和数据大小
+    std::cout << "sendmsg: sending to " << target_ip << ":" << target_port
               << ", total data = " << total_len << " bytes" << std::endl;
 
-    // ========== 5. 确保 RDMA 已初始化 ==========
+    // 确保 RDMA 初始化
     if (!ensure_rdma_initialized()) {
         return fallback_to_normal_sendmsg(msg, flags, to_addr);
     }
 
     auto& peer_manager = GlobalPeerManager::instance();
     const PeerInfo* peer = nullptr;
-    std::string peer_key = peer_mgr.make_peer_key(target_ip.c_str(), target_port);
 
-    // ========== 6. 检查对端是否存在，不存在则发起连接 ==========
     {
         std::unique_lock<std::mutex> lock(cv_mutex_);
 
         peer = peer_manager.get_peer(target_ip.c_str(), target_port);
         if (!peer) {
-            
+            if (flags & MSG_DONTWAIT) {
+                errno = EAGAIN;
+                return -1;
+            }
 
-            // 发送元数据请求
+            // 发送元数据请求（type=0）
             RDMA_Metadata local_meta = get_local_metadata();
+            local_meta.type = 0;   // 请求
             char req_buf[RDMA_Metadata::serialized_size()];
             local_meta.serialize(reinterpret_cast<uint8_t*>(req_buf));
             std::cout << "sendmsg: sending metadata request to " << target_ip << ":" << target_port << std::endl;
@@ -3758,28 +3749,17 @@ ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
                 return fallback_to_normal_sendmsg(msg, flags, to_addr);
             }
 
-
-			if (flags & MSG_DONTWAIT) {
-                errno = EAGAIN;
-                return -1;
-            }
-
-            // 标记正在等待该对端的回复
-            waiting_reply_[peer_key] = true;
-
-            // 等待对端回复（超时5秒）
+            // 等待对端信息出现
             bool ready = cv_.wait_for(lock, std::chrono::seconds(5),
                 [&peer_manager, &target_ip, target_port] {
                     return peer_manager.get_peer(target_ip.c_str(), target_port) != nullptr;
                 });
 
             if (!ready) {
-                waiting_reply_.erase(peer_key);  // 超时清除标记
                 errno = ETIMEDOUT;
                 return -1;
             }
 
-            // 成功获得回复，此时 waiting_reply_ 已在 handle_control_message 中清除
             peer = peer_manager.get_peer(target_ip.c_str(), target_port);
             if (!peer) {
                 return fallback_to_normal_sendmsg(msg, flags, to_addr);
@@ -3787,15 +3767,13 @@ ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
         }
     }
 
-    // ========== 7. 数据大小检查 ==========
+    // 数据大小检查
     if (total_len > m_rdma_manager->send_buffer().data_capacity()) {
-        std::cerr << "sendmsg: data too large (" << total_len 
-                  << " > " << m_rdma_manager->send_buffer().data_capacity() 
-                  << "), fallback to UDP" << std::endl;
+        std::cerr << "sendmsg: data too large, fallback to UDP" << std::endl;
         return fallback_to_normal_sendmsg(msg, flags, to_addr);
     }
 
-    // ========== 8. 合并 iovec 数据 ==========
+    // 合并 iovec 数据
     std::unique_ptr<char[]> temp_buf(new char[total_len]);
     char* dest = temp_buf.get();
     for (size_t i = 0; i < msg->msg_iovlen; ++i) {
@@ -3803,13 +3781,13 @@ ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
         dest += msg->msg_iov[i].iov_len;
     }
 
-    // ========== 9. 写入 RDMA 发送缓冲区 ==========
+    // 写入 RDMA 发送缓冲区
     if (!m_rdma_manager->send_buffer().write_block(temp_buf.get(), total_len)) {
         errno = EAGAIN;
         return -1;
     }
 
-    // ========== 10. 执行 RDMA 发送 ==========
+    // 执行 RDMA 发送
     if (!post_send_to_peer(peer, total_len)) {
         return fallback_to_normal_sendmsg(msg, flags, to_addr);
     }

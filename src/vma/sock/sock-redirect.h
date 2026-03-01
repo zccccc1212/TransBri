@@ -99,11 +99,12 @@ struct RDMA_Metadata {
     uint32_t qpn;                   // QP号
     uint8_t gid[16];                // GID（RoCE网络使用）
     uint8_t port_num;               // 端口号
+    uint8_t type;                    // 新增：0=请求，1=回复
     uint32_t qkey;                  // QKEY
     
     RDMA_Metadata() 
-        : qpn(0), port_num(1), qkey(0x111111) {
-        memset(gid, 0, sizeof(gid));  // 初始化GID为0
+        : qpn(0), port_num(1), type(0), qkey(0x111111) {
+        memset(gid, 0, sizeof(gid));
     }
     
     // 序列化（用于网络传输）
@@ -117,8 +118,11 @@ struct RDMA_Metadata {
         // 序列化port_num
         *(buffer + 20) = port_num;
         
+        // 序列化type
+        *(buffer + 21) = type;
+        
         // 序列化qkey
-        *reinterpret_cast<uint32_t*>(buffer + 21) = qkey;
+        *reinterpret_cast<uint32_t*>(buffer + 22) = qkey;
     }
     
     // 反序列化（用于从网络接收）
@@ -132,16 +136,21 @@ struct RDMA_Metadata {
         // 反序列化port_num
         port_num = *(buffer + 20);
         
+        // 反序列化type
+        type = *(buffer + 21);
+        
         // 反序列化qkey
-        qkey = *reinterpret_cast<const uint32_t*>(buffer + 21);
+        qkey = *reinterpret_cast<const uint32_t*>(buffer + 22);
     }
     
     // 获取序列化后的字节数
     static constexpr size_t serialized_size() {
         return sizeof(uint32_t) +  // qpn
-               16 +                // gid (16 bytes)
-               1 +                 // port_num (uint8_t)
+               16 +                // gid
+               1 +                 // port_num
+               1 +                 // type
                sizeof(uint32_t);   // qkey
+        // 结果 = 4 + 16 + 1 + 1 + 4 = 26 字节
     }
     
     // 打印元数据信息
@@ -159,6 +168,8 @@ struct RDMA_Metadata {
         std::cout << std::dec << std::endl;
         
         std::cout << "  Port: " << static_cast<int>(port_num) << std::endl;
+        std::cout << "  Type: " << static_cast<int>(type) << " ("
+                  << (type == 0 ? "Request" : "Reply") << ")" << std::endl;
         std::cout << "  QKey: 0x" << std::hex << qkey << std::dec << std::endl;
     }
 };
