@@ -549,6 +549,8 @@ private:
 
     ibv_pd* m_pd;  // 保护域指针
 
+    std::map<std::string, bool> waiting_reply_;   // 正在等待回复的对端
+
 };
 /**
  * 全局控制线程类（单例）
