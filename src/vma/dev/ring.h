@@ -1535,9 +1535,9 @@ public:
 
 private:
     // ============ 常量 ============
-    static constexpr size_t DATA_SIZE = 1472;     // 每个块的数据部分大小
+    static constexpr size_t DATA_SIZE = 3500;     // 每个块的数据部分大小
     static constexpr size_t HEADER_SIZE = 8;      // 头部大小
-    static constexpr size_t BLOCK_TOTAL_SIZE = DATA_SIZE + HEADER_SIZE; // 1480字节
+    static constexpr size_t BLOCK_TOTAL_SIZE = DATA_SIZE + HEADER_SIZE; 
     
     // ============ 块头部结构 ============
     #pragma pack(push, 1)

@@ -3701,10 +3701,7 @@ ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
 
         peer = peer_manager.get_peer(target_ip.c_str(), target_port);
         if (!peer) {
-            if (flags & MSG_DONTWAIT) {
-                errno = EAGAIN;
-                return -1;
-            }
+            
 
             RDMA_Metadata local_meta = get_local_metadata();
             char req_buf[RDMA_Metadata::serialized_size()];
@@ -3733,6 +3730,11 @@ ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
             }
         }
     }
+
+	if (flags & MSG_DONTWAIT) {
+                errno = EAGAIN;
+                return -1;
+            }
 
     if (total_len > m_rdma_manager->send_buffer().data_capacity()) {
         std::cerr << "sendmsg: data too large, fallback to UDP" << std::endl;
