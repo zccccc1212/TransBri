@@ -3369,7 +3369,8 @@ ssize_t Socket_tb_tcp::recv(void *__buf, size_t __nbytes, int __flags) {
 //Socket_tb_udp impl
 Socket_tb_udp::Socket_tb_udp(int fd) 
     : Socket_transbridge(fd) , // 调用基类构造函数,
-	m_rdma_manager(nullptr)
+	m_rdma_manager(nullptr),
+	m_isConnected(false)
 {
     setType(SOCKET_TYPE_UDP);
 	m_rdma_initialized = false;
@@ -3517,55 +3518,54 @@ bool Socket_tb_udp::ensure_rdma_initialized() {
     return true;
 }
 
-void Socket_tb_udp::handle_control_message(const char* data,
+
+
+void Socket_tb_udp::handle_control_message(const char* data, ssize_t len,
                                            const struct sockaddr_in& src_addr,
                                            socklen_t addrlen) {
-    RDMA_Metadata meta;
+    // 1. 反序列化对端元数据
+    RDMA_Metadata remote_meta;
     try {
-        meta.deserialize(reinterpret_cast<const uint8_t*>(data));
+        remote_meta.deserialize(reinterpret_cast<const uint8_t*>(data));
     } catch (...) {
-        return;  // 非有效元数据，忽略
+        std::cerr << "handle_control_message: failed to deserialize metadata" << std::endl;
+        return;
     }
 
+    // 2. 提取源 IP 和端口
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &src_addr.sin_addr, ip, sizeof(ip));
     int port = ntohs(src_addr.sin_port);
+    std::cout << "handle_control_message: received metadata from " << ip << ":" << port << std::endl;
 
-    auto& peer_mgr = GlobalPeerManager::instance();
-    const PeerInfo* existing = peer_mgr.get_peer(ip, port);
-
-    {
-        std::unique_lock<std::mutex> lock(cv_mutex_);  // 保护对端更新
-
-        if (!existing) {
-            if (!ensure_rdma_initialized()) {
-                std::cerr << "Cannot handle new peer: RDMA not initialized" << std::endl;
-                return;
-            }
-            ibv_pd* pd = m_rdma_manager->getPd();
-            peer_mgr.add_peer(ip, port, meta, pd);
-            peer_mgr.get_or_create_ah(ip, port, pd, meta.port_num);
-
-            // 发送本地元数据回复
-            RDMA_Metadata local_meta = get_local_metadata();
-            char reply[RDMA_Metadata::serialized_size()];
-            local_meta.serialize(reinterpret_cast<uint8_t*>(reply));
-
-            lock.unlock();  // 发送时释放锁
-            ssize_t sent = orig_os_api.sendto(m_fd, reply, sizeof(reply), 0,
-                                              (struct sockaddr*)&src_addr, addrlen);
-            if (sent != sizeof(reply)) {
-                std::cerr << "Failed to send metadata reply to " << ip << ":" << port << std::endl;
-            }
-        } else {
-            // 已有对端，可能是主动请求的回复，更新信息
-            ibv_pd* pd = m_rdma_manager->getPd();
-            peer_mgr.add_peer(ip, port, meta, pd);
-            peer_mgr.get_or_create_ah(ip, port, pd, meta.port_num);
-        }
+    // 3. 确保 RDMA 资源已初始化（以便发送回复）
+    if (!ensure_rdma_initialized()) {
+        std::cerr << "handle_control_message: RDMA not initialized, cannot reply" << std::endl;
+        return;
     }
 
-    // 唤醒所有等待该对端的 sendto/sendmsg 线程
+    auto& peer_mgr = GlobalPeerManager::instance();
+    ibv_pd* pd = m_rdma_manager->getPd();
+
+    // 4. 更新对端信息（添加或更新已有记录）
+    peer_mgr.add_peer(ip, port, remote_meta, pd);
+    peer_mgr.get_or_create_ah(ip, port, pd, remote_meta.port_num);
+
+    // 5. 发送本地元数据作为回复（无论对端之前是否存在）
+    RDMA_Metadata local_meta = get_local_metadata();
+    char reply[RDMA_Metadata::serialized_size()];
+    local_meta.serialize(reinterpret_cast<uint8_t*>(reply));
+
+    ssize_t sent = orig_os_api.sendto(m_fd, reply, sizeof(reply), 0,
+                                      (struct sockaddr*)&src_addr, addrlen);
+    if (sent != sizeof(reply)) {
+        std::cerr << "handle_control_message: failed to send metadata reply to "
+                  << ip << ":" << port << std::endl;
+    } else {
+        std::cout << "handle_control_message: sent metadata reply to " << ip << ":" << port << std::endl;
+    }
+
+    // 6. 唤醒可能正在等待该对端连接的发送线程
     cv_.notify_all();
 }
 

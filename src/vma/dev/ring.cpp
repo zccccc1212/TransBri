@@ -1121,13 +1121,7 @@ void CQManager::handleSendCompletion(ibv_wc& wc) {
         std::cerr << "Warning: No fd found for QP " << wc.qp_num << std::endl;
     }
     // 默认处理：打印完成事件信息
-        std::cout << " (qp_num=" << wc.qp_num << ")"
-                  << ", wr_id=" << wc.wr_id
-                  << ", status=" << ibv_wc_status_str(wc.status)
-                  << ", opcode=" << wc.opcode
-                  << ", byte_len=" << wc.byte_len 
-                  << ", fd=" << fd
-                  << std::endl;
+       // std::cout << " (qp_num=" << wc.qp_num << ")" << ", wr_id=" << wc.wr_id << ", status=" << ibv_wc_status_str(wc.status) << ", opcode=" << wc.opcode << ", byte_len=" << wc.byte_len << ", fd=" << fd << std::endl;
     
     
 }
@@ -1164,13 +1158,7 @@ void CQManager::handleRecvCompletion(ibv_wc& wc) {
         std::cerr << "Warning: No fd found for QP " << wc.qp_num << std::endl;
     }
     // 默认处理：打印完成事件信息
-        std::cout << " (qp_num=" << wc.qp_num << ")"
-                  << ", wr_id=" << wc.wr_id
-                  << ", status=" << ibv_wc_status_str(wc.status)
-                  << ", opcode=" << wc.opcode
-                  << ", byte_len=" << wc.byte_len 
-                  << ", fd=" << fd
-                  << std::endl;
+    //    std::cout << " (qp_num=" << wc.qp_num << ")"<< ", wr_id=" << wc.wr_id << ", status=" << ibv_wc_status_str(wc.status) << ", opcode=" << wc.opcode << ", byte_len=" << wc.byte_len << ", fd=" << fd << std::endl;
 }
 
 
