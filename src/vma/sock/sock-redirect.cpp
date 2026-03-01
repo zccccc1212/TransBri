@@ -3518,7 +3518,7 @@ bool Socket_tb_udp::ensure_rdma_initialized() {
     return true;
 }
 
-void Socket_tb_udp::handle_control_message(const char* data, ssize_t len,
+void Socket_tb_udp::handle_control_message(const char* data,
                                            const struct sockaddr_in& src_addr,
                                            socklen_t addrlen) {
     // 1. 反序列化对端元数据
@@ -3530,10 +3530,12 @@ void Socket_tb_udp::handle_control_message(const char* data, ssize_t len,
         return;
     }
 
+	auto& peer_mgr = GlobalPeerManager::instance();
+
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &src_addr.sin_addr, ip, sizeof(ip));
     int port = ntohs(src_addr.sin_port);
-    std::string peer_key = make_peer_key(ip, port);
+    std::string peer_key = peer_mgr.make_peer_key(ip, port);
 
     bool is_reply = false;
     {
@@ -3551,7 +3553,7 @@ void Socket_tb_udp::handle_control_message(const char* data, ssize_t len,
         return;
     }
 
-    auto& peer_mgr = GlobalPeerManager::instance();
+    
     ibv_pd* pd = m_rdma_manager->getPd();
 
     // 3. 更新对端信息（总是更新，包括 AH）
@@ -3604,7 +3606,7 @@ ssize_t Socket_tb_udp::sendto(const void *__buf, size_t __nbytes, int __flags,
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &to_addr->sin_addr, ip_str, sizeof(ip_str));
     int port = ntohs(to_addr->sin_port);
-    std::string peer_key = make_peer_key(ip_str, port);
+    std::string peer_key = peer_mgr.make_peer_key(ip_str, port);
 
     // ========== 2. 确保 RDMA 已初始化 ==========
     if (!ensure_rdma_initialized()) {
@@ -3732,7 +3734,7 @@ ssize_t Socket_tb_udp::sendmsg(const struct msghdr *msg, int flags) {
 
     auto& peer_manager = GlobalPeerManager::instance();
     const PeerInfo* peer = nullptr;
-    std::string peer_key = make_peer_key(target_ip.c_str(), target_port);
+    std::string peer_key = peer_mgr.make_peer_key(target_ip.c_str(), target_port);
 
     // ========== 6. 检查对端是否存在，不存在则发起连接 ==========
     {
