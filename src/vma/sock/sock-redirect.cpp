@@ -3578,7 +3578,7 @@ void Socket_tb_udp::handle_control_message(const char* data,
 }
 
 
-RDMA_Metadata Socket_tb_udp::get_local_metadata() const {
+RDMA_Metadata Socket_tb_udp::get_local_metadata(){
     RDMA_Metadata meta;
     if (m_rdma_manager) {
         meta.qpn = m_rdma_manager->getQpNum();
